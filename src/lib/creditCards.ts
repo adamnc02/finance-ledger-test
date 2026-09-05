@@ -1,0 +1,618 @@
+// Credit card calculations. Two different kinds of function live here,
+// deliberately kept separate:
+//  - PURE, non-mutating schedule generation (generateMinimumPaymentTransactions)
+//    — same "compute what should exist, caller dedupes" contract as
+//    schedule.ts / ledgerLoans.ts. These produce PENDING transactions and
+//    do NOT touch currentBalance directly — that happens later, uniformly,
+//    via applyClearSideEffects once a transaction actually clears (see
+//    clearTransaction.ts and autoClear.ts).
+//  - RECORDING functions (recordCreditCardSpend, recordCreditCardLumpPayment)
+//    for things the user is telling the app already happened. NEITHER
+//    of these writes to card.currentBalance any more — see below.
+//
+// THE BALANCE IS DERIVED, NOT STORED. card.currentBalance is a stated
+// anchor as at card.balanceAsOfDate and is only ever changed by the
+// person editing it. What the card owes right now comes from
+// cardBalanceAsOf(), which replays interest and card activity forward
+// from that anchor. See the comment on CreditCard in types/ledger.ts for
+// the bug this replaced.
+
+import { nanoid } from 'nanoid'
+import { CREDIT_CARD_CATEGORY_ID, CREDIT_CARD_COLORS, type CreditCard, type CreditCardLumpPayment, type Transaction } from '../types/ledger'
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+import { toLocalIsoDate as toIso } from './date'
+
+/**
+ * The monthly rate that compounds to the given APR over a year — NOT a
+ * simple APR/12 division, which understates it. E.g. 22.9% APR compounds
+ * from a monthly rate of ~1.73%, not 22.9/12 ≈ 1.91% (division actually
+ * overstates the simple case, but the two diverge either direction
+ * depending on the rate — the point is APR/12 isn't the right monthly
+ * figure either way; this is the rate that genuinely compounds back to
+ * the stated APR across 12 months).
+ */
+export function monthlyInterestRate(interestRatePercent: number): number {
+  return Math.pow(1 + interestRatePercent / 100, 1 / 12) - 1
+}
+
+/** One cycle's interest, applied to a balance. Deliberately simplified — no daily accrual, no interest-free grace period on new purchases, interest just compounds monthly against whatever the balance is at each billing cycle. Same "clearly-scoped approximation" philosophy as the tax engine's own documented simplifications elsewhere in this app. */
+export function applyMonthlyInterest(balance: number, interestRatePercent: number): number {
+  if (balance <= 0) return balance
+  return round2(balance * (1 + monthlyInterestRate(interestRatePercent)))
+}
+
+/**
+ * The minimum payment for a GIVEN balance — the pure calculation shared
+ * by both the "what's due right now" single-point query below and the
+ * forward-simulating generator further down (and, via simulateCardPayoffMonths,
+ * the What-if page's card payoff/overpayment simulation).
+ */
+export function minimumPaymentForBalance(minimumPayment: CreditCard['minimumPayment'], balance: number): number {
+  if (balance <= 0) return 0
+  if (minimumPayment.type === 'fixed') return round2(Math.min(minimumPayment.amount, balance))
+  return round2((balance * minimumPayment.percent) / 100)
+}
+
+/**
+ * The amount due for this cycle, computed fresh against the card's
+ * CURRENT balance — never cached. For percent_of_balance cards this is
+ * exactly why: 5% of a shrinking balance shrinks in turn each cycle, so
+ * caching the £ figure from an earlier cycle would silently go stale.
+ *
+ * Interest for the UPCOMING cycle is applied first, before the minimum
+ * is calculated — real statements work the same way: interest posts to
+ * the balance, THEN the minimum payment is calculated against that new,
+ * interest-inflated statement balance. currentBalance itself already
+ * reflects every PAST cycle's interest (applied when each prior payment
+ * cleared, see applyClearSideEffects in clearTransaction.ts) — this one
+ * extra application projects one cycle further, for the payment that
+ * hasn't happened yet.
+ */
+export function computeMinimumPaymentAmount(card: CreditCard): number {
+  const balanceWithInterest = applyMonthlyInterest(card.currentBalance, card.interestRatePercent)
+  return minimumPaymentForBalance(card.minimumPayment, balanceWithInterest)
+}
+
+/**
+ * The card's next minimum charge — the figure to show anywhere the app
+ * says "due" or "min. due" for a card.
+ *
+ * Prefer this over computeMinimumPaymentAmount at every DISPLAY site.
+ * computeMinimumPaymentAmount is a pure balance→minimum calculation with
+ * no notion of a date, and so cannot consult minimumPaymentOverrides at
+ * all. That gave the app two independent answers to one question: the
+ * Loans collapsed row and the Home card widget computed their own figure
+ * and ignored overrides, while the Summary page and the ledger modal
+ * routed through generateMinimumPaymentTransactions and honoured them.
+ * Reproduced: a card with the 14 Sep charge overridden to £100 showed
+ * £100 on Summary and the modal, £228.07 on Loans and Home, in the same
+ * session, from the same data.
+ *
+ * Routing every display site through the same generator that Summary and
+ * the modal already use makes divergence structurally impossible rather
+ * than merely currently-absent — an override, a lump payment landing
+ * before the charge date, and the interest-then-minimum ordering are all
+ * applied in exactly one place. Returns null when the card has no
+ * upcoming charge at all (inactive, or nothing owed).
+ */
+export function nextMinimumChargeAmount(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): number | null {
+  // 13 months, so a card whose payment day has already passed this month
+  // still finds next month's, and a full year of clamping edge cases
+  // (short months, Feb) can't produce an empty window.
+  const rangeEnd = new Date(asOfDate.getFullYear() + 1, asOfDate.getMonth() + 1, 0)
+  const upcoming = generateMinimumPaymentTransactions(card, asOfDate, rangeEnd, transactions)
+  return upcoming.length > 0 ? upcoming[0].amount : null
+}
+
+/**
+ * What this card ACTUALLY owes as at `asOfDate` — the single source of
+ * truth for every "outstanding"/"owed"/"remaining" figure in the app.
+ *
+ * Replays forward from the stated anchor (card.currentBalance as at
+ * card.balanceAsOfDate):
+ *  - a billing cycle's interest posts on each paymentDayOfMonth STRICTLY
+ *    AFTER the anchor date. Not on the anchor date itself: a stated
+ *    balance for a given day already includes that day's statement
+ *    interest, so charging it again would inflate the very figure the
+ *    person just typed in.
+ *  - card activity dated on or after the anchor date and on or before
+ *    `asOfDate` is applied in date order — spend adds, payments subtract.
+ *    Interest for a date is applied before that date's transactions,
+ *    matching how a real statement posts interest and THEN takes the
+ *    payment (and matching generateMinimumPaymentTransactions below).
+ *
+ * Membership is decided BY DATE, not by `status`. Per the confirmed rule,
+ * a payment dated today has completed and must be reflected immediately;
+ * going by date says so directly instead of depending on whether an
+ * auto-clear pass has run yet and flipped a flag. A future-dated payment
+ * is excluded because its date hasn't arrived, not because of its status.
+ *
+ * Anything dated BEFORE the anchor is ignored outright — it's already
+ * inside the stated figure, exactly as an opening balance works on the
+ * Salary page. This is what makes the anchor safe to re-save: writing the
+ * same currentBalance back can no longer erase a payment, because the
+ * payment was never inside currentBalance to begin with.
+ */
+export function cardBalanceAsOf(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): number {
+  const asOfIso = toIso(asOfDate)
+  const anchorIso = card.balanceAsOfDate
+
+  const activity = transactions
+    .filter(
+      (t) =>
+        t.creditCardId === card.id &&
+        (t.type === 'credit_card_spend' || t.type === 'credit_card_payment') &&
+        t.date >= anchorIso &&
+        t.date <= asOfIso,
+    )
+    .sort((a, b) => a.date.localeCompare(b.date))
+
+  // Every date on which SOMETHING happens: a billing date (interest) or
+  // a transaction. Walking a merged, sorted set of dates keeps the two
+  // kinds of event correctly interleaved when they land in the same
+  // cycle, without iterating day by day over what could be years.
+  const billingDates = billingDatesBetween(card.paymentDayOfMonth, anchorIso, asOfIso)
+  const allDates = [...new Set([...billingDates, ...activity.map((t) => t.date)])].sort()
+
+  let balance = card.currentBalance
+  for (const date of allDates) {
+    if (billingDates.includes(date)) balance = applyMonthlyInterest(balance, card.interestRatePercent)
+    for (const t of activity.filter((a) => a.date === date)) {
+      balance = t.type === 'credit_card_spend' ? round2(balance + t.amount) : round2(Math.max(0, balance - t.amount))
+    }
+  }
+  return round2(Math.max(0, balance))
+}
+
+/** Every paymentDayOfMonth occurrence strictly after `afterIso` and on or before `throughIso` — the dates a cycle's interest posts. Clamped to the length of each month, same rule generateMinimumPaymentTransactions uses. */
+function billingDatesBetween(paymentDayOfMonth: number, afterIso: string, throughIso: string): string[] {
+  const results: string[] = []
+  const start = new Date(afterIso)
+  const end = new Date(throughIso)
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return results
+  let cursor = new Date(start.getFullYear(), start.getMonth(), 1)
+  let guard = 0
+  while (cursor <= end && guard < 1200) {
+    const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
+    const iso = toIso(new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(paymentDayOfMonth, daysInMonth)))
+    if (iso > afterIso && iso <= throughIso) results.push(iso)
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+    guard++
+  }
+  return results
+}
+
+/**
+ * Which statement window's close a given payment date belongs to (item
+ * e) — the most recent occurrence of `statementEndDay` before
+ * `paymentDate`. Both days recur once a month, and Adam confirmed
+ * exactly one close happens between a window's close and its own due
+ * date, so this is a plain day-number comparison rather than a real walk:
+ * if the close day is numerically EARLIER in the month than the payment
+ * day, the relevant close already happened THIS month; otherwise (equal
+ * or later) it happened the month before — matches the worked example
+ * (close 18th, due 14th: 18 >= 14, so the close is the 18th of the
+ * PRECEDING month). Only called once `card.statementEndDay` is set.
+ */
+function statementCloseDateForPaymentDate(card: CreditCard, paymentDate: Date): Date {
+  const endDay = card.statementEndDay!
+  const year = paymentDate.getFullYear()
+  const month = paymentDate.getMonth()
+  if (endDay < card.paymentDayOfMonth) {
+    const daysInMonth = new Date(year, month + 1, 0).getDate()
+    return new Date(year, month, Math.min(endDay, daysInMonth))
+  }
+  const daysInPrevMonth = new Date(year, month, 0).getDate()
+  return new Date(year, month - 1, Math.min(endDay, daysInPrevMonth))
+}
+
+/**
+ * The card with its stored anchor swapped for the live derived balance —
+ * the one thing READ sites should use. Everything downstream
+ * (computeMinimumPaymentAmount, simulateCardPayoffMonths, the What-if
+ * engine) already works off `currentBalance`, so handing it a card whose
+ * currentBalance IS the live figure keeps all of them correct without
+ * each one needing to learn about anchors and replays.
+ *
+ * Never persist the result: writing it back would re-anchor the card to a
+ * figure that already includes activity the replay would then apply a
+ * second time.
+ */
+export function withLiveBalance(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCard {
+  return { ...card, currentBalance: cardBalanceAsOf(card, transactions, asOfDate) }
+}
+
+/**
+ * Generates pending credit_card_payment transactions for the given
+ * card's payment day, one per month in the range — genuinely SIMULATING
+ * the balance forward month by month, rather than computing every
+ * month's amount against a single static snapshot (which silently broke
+ * compounding whenever more than one month was generated in the same
+ * call: a percent-of-balance card would show the exact same minimum for
+ * every future month instead of shrinking).
+ *
+ * Also accounts for any logged lump payment dated before a given
+ * month's payment date — a repayment logged for the 20th genuinely
+ * reduces what the NEXT minimum payment is calculated against, even
+ * before that repayment has itself cleared. Only lump payments that
+ * HAVEN'T cleared yet (dated after today) are folded into the
+ * simulation — anything already cleared is already reflected in
+ * card.currentBalance, the simulation's starting point, and re-applying
+ * it here would double-count it.
+ *
+ * ITEM E — statement windows: once `card.statementEndDay` is set, each
+ * due date's minimum is computed off a SEPARATE `statementBalance` that
+ * only picks up real `credit_card_spend` transactions dated on/before
+ * that window's own close (statementCloseDateForPaymentDate) — a
+ * purchase posted after the close still shows in the card's live balance
+ * immediately (via `workingBalance`/`cardBalanceAsOf` elsewhere) but
+ * doesn't count toward THIS minimum, rolling into the next window's
+ * instead, matching real statement mechanics. Lump payments are NOT
+ * window-gated (confirmed against real UK card practice) — they reduce
+ * both balances immediately, same as today. Whenever `statementEndDay`
+ * is absent, `statementBalance` is kept in lockstep with `workingBalance`
+ * the whole way through and never diverges, so the minimum is always
+ * read from `workingBalance` as before — byte-identical output to the
+ * pre-item-e behaviour for every existing card.
+ */
+export function generateMinimumPaymentTransactions(
+  card: CreditCard,
+  rangeStart: Date,
+  rangeEnd: Date,
+  transactions: Transaction[] = [],
+): Omit<Transaction, 'id'>[] {
+  if (!card.active) return []
+  const results: Omit<Transaction, 'id'>[] = []
+
+  // The simulation starts from the balance as at RANGE START — not the
+  // stored anchor, and not "as of today" either.
+  //
+  // Not the anchor: it may be months old, with real spend and payments
+  // logged since, so a percent-of-balance minimum computed off it would
+  // be quoting against a debt that's already partly paid.
+  //
+  // Not today: rangeStart is routinely in the PAST (projection.ts
+  // generates from the current cycle's start so that an occurrence
+  // earlier this cycle still appears). Anchoring at today and then
+  // simulating a payment dated last week would subtract that payment
+  // from a balance which — if it had already been materialized — already
+  // reflected it, understating every later month. Anchoring at
+  // rangeStart makes the split unambiguous: everything BEFORE rangeStart
+  // is inside the starting figure, everything from rangeStart onward is
+  // simulated forward exactly once.
+  //
+  // It also makes this function deterministic given its arguments rather
+  // than dependent on the wall clock, which is what let the fixtures
+  // below drift as real time passed.
+  const rangeStartIso = toIso(rangeStart)
+  let workingBalance = cardBalanceAsOf(card, transactions, rangeStart)
+  // The statement-window figure (item e) — starts equal to workingBalance
+  // and only ever diverges from it when real spend lands after a
+  // window's close but before that window's own due date.
+  let statementBalance = workingBalance
+  // Same cut, applied to logged lump payments: one dated on or before
+  // rangeStart is already inside workingBalance above (its transaction
+  // was replayed into it), so folding it in again here would
+  // double-count. Only ones landing inside the simulated window get
+  // applied by the loop below.
+  const pendingLumpPayments = card.lumpPayments.filter((lp) => lp.date > rangeStartIso).sort((a, b) => a.date.localeCompare(b.date))
+  let lumpIndex = 0
+  // item e — real spend dated after rangeStart, needed to know how much
+  // of a window's own activity should count toward ITS minimum (spend on
+  // or before the close) versus roll into the next one (spend after).
+  // Same "already-anchored vs still-to-simulate" cut as lump payments
+  // above; spend already inside `workingBalance`/`rangeStart` needs no
+  // separate handling here.
+  const pendingSpend = transactions
+    .filter((t) => t.creditCardId === card.id && t.type === 'credit_card_spend' && t.date > rangeStartIso)
+    .sort((a, b) => a.date.localeCompare(b.date))
+  // Two INDEPENDENT pointers into the same sorted list — a spend hits
+  // workingBalance (the true running balance) as soon as its own date
+  // has passed, but may need to wait for a LATER iteration's window to
+  // close before it's added to statementBalance (the figure minimums are
+  // computed against). A single shared pointer would consume an entry
+  // the moment it passed `paymentDateIso` regardless of whether it also
+  // cleared `closeDateIso` that same iteration, silently losing it for
+  // the later window it actually belongs to.
+  let workingSpendIndex = 0
+  let statementSpendIndex = 0
+
+  let cursor = new Date(rangeStart.getFullYear(), rangeStart.getMonth(), 1)
+  while (cursor <= rangeEnd) {
+    const daysInMonth = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 0).getDate()
+    const paymentDate = new Date(cursor.getFullYear(), cursor.getMonth(), Math.min(card.paymentDayOfMonth, daysInMonth))
+    const paymentDateIso = toIso(paymentDate)
+    const closeDateIso = card.statementEndDay != null ? toIso(statementCloseDateForPaymentDate(card, paymentDate)) : null
+
+    // Fold in any real spend dated up to this payment date into the true
+    // running balance — always, regardless of window.
+    while (workingSpendIndex < pendingSpend.length && pendingSpend[workingSpendIndex].date <= paymentDateIso) {
+      workingBalance = round2(workingBalance + pendingSpend[workingSpendIndex].amount)
+      workingSpendIndex++
+    }
+    // Fold spend into the statement-window balance only once ITS OWN
+    // window has actually closed — `closeDateIso` here is THIS
+    // iteration's close, so a spend dated after it waits for a later
+    // iteration (whichever one's close finally clears it). No window
+    // tracking configured at all (`closeDateIso` null) means every
+    // pending spend qualifies immediately, matching workingBalance
+    // exactly — the pre-item-e behaviour.
+    // No window tracking configured (`closeDateIso` null) falls back to
+    // paymentDateIso as the cutoff — identical pacing to workingBalance
+    // above, so the two stay byte-identical the whole way through.
+    const statementCutoffIso = closeDateIso ?? paymentDateIso
+    while (statementSpendIndex < pendingSpend.length && pendingSpend[statementSpendIndex].date <= statementCutoffIso) {
+      statementBalance = round2(statementBalance + pendingSpend[statementSpendIndex].amount)
+      statementSpendIndex++
+    }
+
+    // Interest for this cycle posts first, against the balance as it
+    // stood going into the cycle — THEN any lump payments logged within
+    // it reduce the balance, THEN the minimum is calculated against
+    // what's left. This slightly overstates interest if a lump payment
+    // landed early in the cycle (no daily precision here), which is a
+    // deliberate, conservative simplification rather than an attempt at
+    // exact accrual. Applied to BOTH balances identically — item e adds
+    // no new interest-timing modelling of its own, deliberately, since
+    // Adam didn't ask for daily/grace-period accrual and the app's
+    // existing simplification already doesn't model that.
+    workingBalance = applyMonthlyInterest(workingBalance, card.interestRatePercent)
+    statementBalance = applyMonthlyInterest(statementBalance, card.interestRatePercent)
+
+    // Apply any still-pending lump payments dated on/before this
+    // payment date, in date order, BEFORE computing this month's
+    // minimum — this is what makes a repayment logged ahead of the next
+    // charge date actually count toward it. NOT window-gated (item e,
+    // confirmed against real practice) — applies to both balances.
+    while (lumpIndex < pendingLumpPayments.length && pendingLumpPayments[lumpIndex].date <= paymentDateIso) {
+      workingBalance = round2(Math.max(0, workingBalance - pendingLumpPayments[lumpIndex].amount))
+      statementBalance = round2(Math.max(0, statementBalance - pendingLumpPayments[lumpIndex].amount))
+      lumpIndex++
+    }
+
+    if (paymentDate >= rangeStart && paymentDate <= rangeEnd) {
+      // Emitted for past dates within the range too: callers
+      // (projection.ts, autoClear.ts) rely on getting them so they can
+      // be materialized or deduped against what already exists.
+      // A per-date override (credit card ledger modal — "tap a row to
+      // adjust") takes precedence over the computed figure, but still
+      // feeds into workingBalance below exactly like a computed one
+      // would, so later periods' compounding reflects the edit rather
+      // than silently reverting to the un-overridden trajectory next
+      // month.
+      const override = card.minimumPaymentOverrides?.find((o) => o.date === paymentDateIso)
+      const amount = override ? override.amount : minimumPaymentForBalance(card.minimumPayment, statementBalance)
+      if (amount > 0) {
+        results.push({
+          date: paymentDateIso,
+          amount,
+          direction: 'out',
+          // Deliberately the fixed builtin Credit Card category, NOT
+          // card.categoryId — unlike a logged spend or lump payment
+          // (which carry the card's own real, freely-assignable
+          // category), the generated minimum-charge payment is always
+          // hardcoded to Credit Card so it reads unambiguously as "this
+          // card's minimum" in the category view, distinct from whatever
+          // category the card itself has been given for its own icon.
+          categoryId: CREDIT_CARD_CATEGORY_ID,
+          paymentMethod: 'direct_debit',
+          status: 'pending',
+          type: 'credit_card_payment',
+          location: 'personal',
+          ownerId: card.ownerId,
+          creditCardId: card.id,
+          // The card's own name, with "Minimum Charge" appended — without
+          // this suffix, a row would show only the card's name, which
+          // reads identically to a logged lump payment against the same
+          // card once both sit together in the Credit Card group.
+          note: `${card.name} - Minimum Charge`,
+        })
+        workingBalance = round2(Math.max(0, workingBalance - amount))
+        statementBalance = round2(Math.max(0, statementBalance - amount))
+      }
+    }
+    cursor = new Date(cursor.getFullYear(), cursor.getMonth() + 1, 1)
+  }
+  return results
+}
+
+/**
+ * Logs a purchase charged to this card, right now. Does NOT touch the
+ * personal ledger at all (per the confirmed design — see the long comment on TransactionType
+ * in types/ledger.ts). status is 'cleared' unless the date is in the
+ * future, matching the same date-based heuristic used for other ad-hoc
+ * ledger entries.
+ */
+export function recordCreditCardSpend(
+  card: CreditCard,
+  amount: number,
+  date: string,
+  note?: string,
+): { updatedCard: CreditCard; transaction: Omit<Transaction, 'id'> } {
+  // The card is returned UNCHANGED — the transaction below is the whole
+  // record of the spend, and cardBalanceAsOf picks it up from there.
+  const updatedCard: CreditCard = card
+  const transaction: Omit<Transaction, 'id'> = {
+    date,
+    amount,
+    direction: 'out',
+    categoryId: card.categoryId,
+    paymentMethod: 'card',
+    status: date <= toIso(new Date()) ? 'cleared' : 'pending',
+    type: 'credit_card_spend',
+    location: 'personal',
+    ownerId: card.ownerId,
+    creditCardId: card.id,
+    note,
+  }
+  return { updatedCard, transaction }
+}
+
+/**
+ * Logs an ad-hoc/lump payment toward this card — reduces currentBalance
+ * immediately (clamped to zero) and produces the matching cash-out
+ * transaction that DOES appear as a negative amount on the Personal
+ * card, same as any other payment against the card.
+ */
+/**
+ * Logs an ad-hoc/lump payment toward this card. Doesn't touch
+ * currentBalance directly — that's applyClearSideEffects's job now,
+ * applied immediately by the caller if the date is today/past, or later
+ * by the automatic date-based clearing pass if it's a future date. Only
+ * the LumpPayment log record itself is added right away, regardless of
+ * date — that's just "you told the app about this payment," not a
+ * balance effect.
+ */
+export function recordCreditCardLumpPayment(
+  card: CreditCard,
+  amount: number,
+  date: string,
+  note?: string,
+): { updatedCard: CreditCard; transaction: Omit<Transaction, 'id'>; lumpPayment: CreditCardLumpPayment } {
+  const lumpPayment: CreditCardLumpPayment = { id: nanoid(8), date, amount, note }
+  const updatedCard: CreditCard = {
+    ...card,
+    lumpPayments: [...card.lumpPayments, lumpPayment],
+  }
+  const transaction: Omit<Transaction, 'id'> = {
+    date,
+    amount,
+    direction: 'out',
+    categoryId: card.categoryId,
+    paymentMethod: 'bank_transfer',
+    status: date <= toIso(new Date()) ? 'cleared' : 'pending',
+    type: 'credit_card_payment',
+    location: 'personal',
+    ownerId: card.ownerId,
+    creditCardId: card.id,
+    sourceType: 'credit_card_lump_payment',
+    sourceId: lumpPayment.id,
+    note,
+  }
+  return { updatedCard, transaction, lumpPayment }
+}
+
+/**
+ * How many months until this card would be paid off making only the
+ * minimum payment plus an optional fixed extra amount every month — used
+ * by the What-if page to compare "as things stand" against a hypothetical
+ * lump sum or recurring overpayment, the credit-card equivalent of a
+ * loan's buildLoanSchedule/summarizeLoan. Genuinely simulates month by
+ * month (interest compounds, and a percent-of-balance minimum shrinks as
+ * the balance does) rather than a closed-form estimate — same reasoning
+ * as generateMinimumPaymentTransactions above. Capped at 600 months (50
+ * years) as a safety net against a balance that never reaches zero (e.g.
+ * a fixed minimum smaller than the interest accruing against it).
+ */
+export function simulateCardPayoffMonths(card: CreditCard, extraPerMonth = 0, maxMonths = 600): { months: number; totalInterestPaid: number } {
+  let balance = card.currentBalance
+  let totalInterestPaid = 0
+  let months = 0
+
+  while (balance > 0 && months < maxMonths) {
+    const balanceAfterInterest = applyMonthlyInterest(balance, card.interestRatePercent)
+    totalInterestPaid = round2(totalInterestPaid + round2(balanceAfterInterest - balance))
+    const payment = Math.min(balanceAfterInterest, round2(minimumPaymentForBalance(card.minimumPayment, balanceAfterInterest) + extraPerMonth))
+    // A payment of £0 (e.g. minimum payment rounds to nothing on a tiny
+    // balance, and there's no extra) would loop forever — bail out rather
+    // than spin to maxMonths for a balance that's genuinely never going to
+    // clear under these terms.
+    if (payment <= 0) break
+    balance = round2(Math.max(0, balanceAfterInterest - payment))
+    months++
+  }
+
+  return { months, totalInterestPaid }
+}
+
+/** Round-robins through CREDIT_CARD_COLORS by however many cards already exist — same auto-assignment idea as pickColorForIndex in categories.ts, but on the separate palette described in types/ledger.ts. */
+export function pickCreditCardColor(existingCount: number): string {
+  return CREDIT_CARD_COLORS[existingCount % CREDIT_CARD_COLORS.length]
+}
+
+/** Total paid to date against this card — the "paid" half of the card page's pie chart (doc addendum). Sums credit_card_payment transactions for this card from the full transaction list, since payments aren't tracked as a running total on the CreditCard itself. */
+/**
+ * Total ACTUALLY paid to date against this card — the "paid" half of the
+ * card page's pie chart. Scoped BY DATE (on or before today), not by
+ * `status`: a payment dated today is treated as done, per the confirmed
+ * rule that same-day payments have completed. This is the identical test
+ * cardBalanceAsOf uses to decide what counts, which is what keeps the two
+ * halves of the pie consistent with each other — when they disagreed
+ * (paid rising while outstanding didn't fall) the chart read as
+ * half-updated, which is precisely how the bug was reported.
+ */
+export function totalPaidForCard(cardId: string, transactions: Transaction[], asOfDate: Date = new Date()): number {
+  const todayIso = toIso(asOfDate)
+  return round2(
+    transactions
+      .filter((t) => t.type === 'credit_card_payment' && t.creditCardId === cardId && t.date <= todayIso)
+      .reduce((sum, t) => sum + t.amount, 0),
+  )
+}
+
+export interface CreditCardMinimumChargeRow {
+  date: string
+  amount: number
+  status: 'cleared' | 'pending'
+  // Whether this row already exists as a real, stored Transaction — an
+  // edit to a materialized row updates that transaction directly; an
+  // edit to a non-materialized (still just generated/projected) row
+  // writes to card.minimumPaymentOverrides instead. Both cases are
+  // handled transparently by LedgerContext's updateCreditCardMinimumCharge
+  // — this flag exists purely so the UI can show a subtle "already
+  // happened" vs "projected" distinction if it wants to, not because the
+  // edit flow itself needs the caller to know which path it'll take.
+  materialized: boolean
+}
+
+/**
+ * Every minimum-charge row for this card's ledger modal (Loans.tsx) —
+ * deliberately ONLY minimum charges, never spend or lump payments, which
+ * already have a full ledger on the card's own Home page detail view.
+ * Combines real stored transactions (materialized: true) with generated
+ * projections for anything not yet materialized, de-duplicated by date —
+ * a stored transaction always wins over a generated one for the same
+ * date, since it's the authoritative real record.
+ */
+export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions: Transaction[], asOfDate: Date = new Date()): CreditCardMinimumChargeRow[] {
+  const todayIso = toIso(asOfDate)
+  const stored = transactions.filter((t) => t.creditCardId === card.id && t.type === 'credit_card_payment' && !t.sourceType)
+  const storedDates = new Set(stored.map((t) => t.date))
+
+  // Confirmed as a real bug: a blind "1 year back" was generating a full
+  // year of entirely fictional past minimum charges for a BRAND NEW
+  // card with no real payment history at all — nothing to show, since
+  // the card didn't exist that far back, but the modal generated rows
+  // for it anyway, burying "today onward" a year of scrolling deep.
+  // CreditCard has no real "created"/start date to anchor to, so the
+  // honest fix is: only look as far back as there's real DATA to
+  // justify it. A card with genuine stored history shows back to its
+  // own earliest real transaction (so anything actually there stays
+  // editable) — a fresh card with none shows nothing before today at
+  // all, rather than a year of rows that never happened.
+  const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => new Date(t.date).getTime())) : asOfDate.getTime()
+  const rangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
+  const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
+  // `transactions` MUST be passed through. Omitted, the generator falls
+  // back to its default empty list, so its opening balance becomes
+  // cardBalanceAsOf(card, [], rangeStart) — which with nothing to replay
+  // is just the raw anchor. Reproduced: a Santander card anchored at £0
+  // with £228.07 of real spend after the anchor produced NO rows at all
+  // (100% of £0 fails the generator's amount > 0 guard), so the modal
+  // showed an empty future for a card that genuinely owed £228.07. Any
+  // figure that did appear was a manual minimumPaymentOverride being
+  // echoed back, never something the modal had computed.
+  const generated = generateMinimumPaymentTransactions(card, rangeStart, rangeEnd, transactions).filter((t) => !storedDates.has(t.date))
+
+  const rows: CreditCardMinimumChargeRow[] = [
+    ...stored.map((t) => ({ date: t.date, amount: t.amount, status: t.status, materialized: true })),
+    ...generated.map((t) => ({ date: t.date, amount: t.amount, status: t.date <= todayIso ? ('cleared' as const) : ('pending' as const), materialized: false })),
+  ]
+  return rows.sort((a, b) => a.date.localeCompare(b.date))
+}
+
+/** Convenience wrapper over withLiveBalance for a whole list — the shape almost every read site actually wants. Same rule applies: display/compute only, never persisted. */
+export function withLiveBalances(cards: CreditCard[], transactions: Transaction[], asOfDate: Date = new Date()): CreditCard[] {
+  return cards.map((card) => withLiveBalance(card, transactions, asOfDate))
+}
