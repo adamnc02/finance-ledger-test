@@ -16,7 +16,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow } from '../components/FormButtons'
-import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal } from '../components/RecurringChangeConfirmModal'
 import { SavedFlashOverlay, useSavedFlash } from '../components/SavedFlash'
 import { NumberInput } from '../components/NumberInput'
 import { CollapsibleSection } from '../components/CollapsibleSection'
@@ -35,7 +35,8 @@ import {
 } from '../lib/savingsPotLedger'
 import { buildExampleLedger } from '../lib/savingsInterest'
 import { newPot, potBalanceAsOf, potDepositOccurrencePreviews } from '../lib/potLedger'
-import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews } from '../lib/schedule'
+import { setPausedTemplateOccurrences, scheduledTemplateDates, templateOccurrencePreviews, recentAndUpcomingOccurrences } from '../lib/schedule'
+import { recentAndUpcomingLoanPaymentDates } from '../lib/ledgerLoans'
 import { locationsEqual, transferLocationLabel, transferLocationKey, buildTransferLocationOptions, type TransferLocationOption } from '../lib/transferLedger'
 import { AmountStep, LocationStep, FrequencyStep, DateStep, type TransferFrequencyChoice, resolveTransferFrequencyChoice } from '../components/TransferSteps'
 import {
@@ -663,8 +664,12 @@ export function SavingsPotForm({
       <div className="grid grid-cols-2 gap-3">
         {initial && <PersonSelectField key="person" people={people} value={personId} onChange={setPersonId} />}
         <Field key="name" label="Name">
+          {/* UAT 2026-09-08 (7-bug8.2-confirm-pot note, same root cause as
+              PotEditForm's identical bug) — this component doubles for
+              both creation and editing an existing pot; only the
+              creation case should steal focus. */}
           <input
-            autoFocus
+            autoFocus={!initial}
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Rainy day fund"
@@ -1157,6 +1162,8 @@ function SavingsPotRow({
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
   onRemoveRecurringTemplate,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   pot: SavingsPot
   people: Person[]
@@ -1183,6 +1190,12 @@ function SavingsPotRow({
   onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemoveRecurringTemplate: (id: string) => void
+  /** UAT 2026-09-08 (9-wallet-pot-savings-joint) — new-savings-pot
+   * creation never wired a flash-on-mount, unlike Pensions/Bills/Loans/
+   * Credit Cards, which all flash their still-collapsed row this same
+   * way right after creation. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const owner = people.find((p) => p.id === pot.personId)
   const balance = savingsPotBalanceAsOf(pot, transactions, new Date())
@@ -1192,6 +1205,13 @@ function SavingsPotRow({
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash()
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -1216,39 +1236,43 @@ function SavingsPotRow({
 
         {ledgerOpen && <SavingsPotLedgerModal pot={pot} transactions={transactions} onOverrideInterest={onOverrideInterest} onClose={() => setLedgerOpen(false)} />}
 
-        {isOpen && (
-          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
-                Loans.tsx gives a loan, right on the pot's own row. Writes
-                through logTransfer (Batch 4: now location-aware) — a
-                second entry point onto the same data the Transactions
-                page's Transfer pill uses, not a parallel mechanism.
-                Batch 6 (2026-09-07 UAT): moved above the edit form to
-                match Joint Account's card ordering. */}
-            <LogTransferButton
-              fixedLocation={{ type: 'savings', savingsPotId: pot.id }}
-              locationOptions={locationOptions}
-              onLogDeposit={onLogDeposit}
-              onLogWithdrawal={onLogWithdrawal}
-              onLogged={triggerFlash}
-            />
+        {/* UAT 2026-09-08 (6-bug4-savings): these two action buttons now
+            render regardless of isOpen, matching Joint Account's own
+            always-visible buttons — only the Name/fields form below stays
+            gated behind expanding the card. */}
+        <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+          {/* Phase 5 (2026-09 session) — same "+ Log a payment" pattern
+              Loans.tsx gives a loan, right on the pot's own row. Writes
+              through logTransfer (Batch 4: now location-aware) — a
+              second entry point onto the same data the Transactions
+              page's Transfer pill uses, not a parallel mechanism.
+              Batch 6 (2026-09-07 UAT): moved above the edit form to
+              match Joint Account's card ordering. */}
+          <LogTransferButton
+            fixedLocation={{ type: 'savings', savingsPotId: pot.id }}
+            locationOptions={locationOptions}
+            onLogDeposit={onLogDeposit}
+            onLogWithdrawal={onLogWithdrawal}
+            onLogged={triggerFlash}
+          />
 
-            {/* Transfer pill (2026-09-04 session) — same discoverable,
-                Loan-style entry point as before, now creating/editing a
-                RecurringTemplate (kind: 'transfer') instead of this
-                pot's own legacy fields, so it shows up in the
-                Transactions page's Transfer pill too. */}
-            <RecurringTransferEditor
-              location={{ type: 'savings', savingsPotId: pot.id }}
-              defaultName={pot.name}
-              templates={recurringTemplates}
-              locationOptions={locationOptions}
-              onAdd={onAddRecurringTransfer}
-              onUpdate={onUpdateRecurringTemplate}
-              onRemove={onRemoveRecurringTemplate}
-              onSaved={triggerFlash}
-            />
+          {/* Transfer pill (2026-09-04 session) — same discoverable,
+              Loan-style entry point as before, now creating/editing a
+              RecurringTemplate (kind: 'transfer') instead of this
+              pot's own legacy fields, so it shows up in the
+              Transactions page's Transfer pill too. */}
+          <RecurringTransferEditor
+            location={{ type: 'savings', savingsPotId: pot.id }}
+            defaultName={pot.name}
+            templates={recurringTemplates}
+            locationOptions={locationOptions}
+            onAdd={onAddRecurringTransfer}
+            onUpdate={onUpdateRecurringTemplate}
+            onRemove={onRemoveRecurringTemplate}
+            onSaved={triggerFlash}
+          />
 
+          {isOpen && (
             <SavingsPotForm
               people={people}
               defaultPersonId={pot.personId}
@@ -1285,8 +1309,8 @@ function SavingsPotRow({
                 triggerFlash()
               }}
             />
-          </div>
-        )}
+          )}
+        </div>
         <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
@@ -1809,6 +1833,14 @@ function PotEditForm({
       else next.add(item.key)
       return next
     })
+    // UAT 2026-09-08 (7-bug8.2-confirm-pot note) — matches Bills.tsx's own
+    // guard: nothing to anchor a date to yet (e.g. a schedule with no
+    // occurrences left), so skip straight to the confirm step dated today
+    // rather than showing an empty picker with nothing to tap.
+    if (occurrencesForItem(item).length === 0) {
+      setPendingToggleConfirm({ item, nowChecked, effectiveFrom: todayIso() })
+      return
+    }
     setPendingToggle({ item, nowChecked, effectiveFrom: todayIso() })
   }
 
@@ -1821,6 +1853,19 @@ function PotEditForm({
       return next
     })
     setPendingToggle(null)
+  }
+
+  // UAT 2026-09-08 (7-bug8.2-confirm-pot note) — picks the right schedule
+  // function depending on which kind of item this checklist row actually
+  // is, so the date picker shows real upcoming payment dates rather than
+  // a bare calendar.
+  function occurrencesForItem(item: (typeof items)[number]) {
+    if (item.kind === 'loan') {
+      const loan = loans.find((l) => l.id === item.id)
+      return loan ? recentAndUpcomingLoanPaymentDates(loan, new Date()) : []
+    }
+    const template = templates.find((t) => t.id === item.id)
+    return template ? recentAndUpcomingOccurrences(template, new Date()) : []
   }
 
   function commitToggle(item: (typeof items)[number], nowChecked: boolean, effectiveFrom: string) {
@@ -1836,8 +1881,12 @@ function PotEditForm({
     <div className="rounded-2xl p-4" style={{ background: 'var(--color-bg-elevated)' }}>
       <div className="grid grid-cols-2 gap-3">
         <Field label="Name">
+          {/* UAT 2026-09-08 (7-bug8.2-confirm-pot note) — this form is
+              edit-only (PotForm, a separate component, handles creation),
+              so an autoFocus here stole focus/moved the cursor every time
+              the pot row was simply expanded to look at it, not just to
+              rename it. */}
           <input
-            autoFocus
             value={name}
             onChange={(e) => setName(e.target.value)}
             className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
@@ -1876,14 +1925,12 @@ function PotEditForm({
       )}
 
       {pendingToggle && (
-        <PotChecklistDateModal
-          itemName={pendingToggle.item.name}
-          nowChecked={pendingToggle.nowChecked}
-          effectiveFrom={pendingToggle.effectiveFrom}
-          onChangeEffectiveFrom={(effectiveFrom) => setPendingToggle({ ...pendingToggle, effectiveFrom })}
+        <EffectiveDateOccurrenceModal
+          description={`${pendingToggle.item.name} is ${pendingToggle.nowChecked ? 'moving to this pot' : 'moving back to Current Account'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`}
+          occurrences={occurrencesForItem(pendingToggle.item)}
           onCancel={revertPendingToggle}
-          onContinue={() => {
-            setPendingToggleConfirm(pendingToggle)
+          onChoose={(effectiveFrom) => {
+            setPendingToggleConfirm({ ...pendingToggle, effectiveFrom })
             setPendingToggle(null)
           }}
         />
@@ -1914,48 +1961,6 @@ function PotEditForm({
   )
 }
 
-/** First step of the pot checklist's tick/untick flow (Batch 7, 2026-09-07,
- * Bug 8) — picks the effective date before handing off to the shared
- * RecurringChangeConfirmModal's diff/confirm step, same two-step shape as
- * Bills.tsx's BillEffectiveDateModal → RecurringChangeConfirmModal, just
- * without an occurrence list to pick from (a pot has no per-occurrence
- * picker infrastructure — a plain date field, defaulting to today, is
- * proportionate here exactly as it already was for this same field before
- * this batch). */
-function PotChecklistDateModal({
-  itemName,
-  nowChecked,
-  effectiveFrom,
-  onChangeEffectiveFrom,
-  onCancel,
-  onContinue,
-}: {
-  itemName: string
-  nowChecked: boolean
-  effectiveFrom: string
-  onChangeEffectiveFrom: (v: string) => void
-  onCancel: () => void
-  onContinue: () => void
-}) {
-  return createPortal(
-    <div className="fixed inset-0 z-[500] flex items-end justify-center" style={{ background: 'rgba(0,0,0,0.55)' }} onClick={onCancel}>
-      <div
-        className="w-full max-w-md rounded-t-3xl p-5"
-        style={{ background: 'var(--color-surface)', paddingBottom: 'calc(var(--nav-h) + var(--safe-bottom) + 20px)' }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h3 className="font-display text-base font-semibold text-[var(--color-ink)] mb-1">Apply this change from…</h3>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-4">
-          {itemName} is {nowChecked ? 'moving to this pot' : 'moving back to Current Account'}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.
-        </p>
-        <EditField label="Changes take effect from" type="date" value={effectiveFrom} onChange={onChangeEffectiveFrom} />
-        <FormButtonRow onCancel={onCancel} onSave={onContinue} saveLabel="Continue" />
-      </div>
-    </div>,
-    document.body,
-  )
-}
-
 /** A single pot's row — collapsed summary + expand, mirroring SavingsPotRow's shape minus the ledger modal (see this section's own header comment for why). */
 function PotRow({
   pot,
@@ -1975,6 +1980,8 @@ function PotRow({
   onAddRecurringTransfer,
   onUpdateRecurringTemplate,
   onRemoveRecurringTemplate,
+  shouldFlashOnMount,
+  onFlashedOnMount,
 }: {
   pot: Pot
   people: Person[]
@@ -1993,6 +2000,10 @@ function PotRow({
   onAddRecurringTransfer: (template: Omit<RecurringTemplate, 'id' | 'active' | 'kind' | 'categoryId' | 'paymentMethod' | 'location' | 'ownerId' | 'payee' | 'payeeSharePercent'>) => void
   onUpdateRecurringTemplate: (id: string, updates: Partial<Omit<RecurringTemplate, 'id'>>) => void
   onRemoveRecurringTemplate: (id: string) => void
+  /** UAT 2026-09-08 (9-wallet-pot-savings-joint) — see SavingsPotRow's
+   * own comment on the same prop. */
+  shouldFlashOnMount?: boolean
+  onFlashedOnMount?: () => void
 }) {
   const owner = people.find((p) => p.id === pot.personId)
   const balance = potBalanceAsOf(pot, transactions, new Date())
@@ -2007,6 +2018,13 @@ function PotRow({
   // Save, its "+ Log a deposit or withdrawal", and its "+ Add a recurring
   // transfer" — all three show "Saved".
   const { active: flashActive, trigger: triggerFlash } = useSavedFlash()
+  useEffect(() => {
+    if (shouldFlashOnMount) {
+      triggerFlash()
+      onFlashedOnMount?.()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   return (
     <SwipeToDelete onDelete={onRemove} confirmLabel={pot.name}>
@@ -2029,39 +2047,43 @@ function PotRow({
           <span className="text-[var(--color-ink-muted)] shrink-0 pl-2">{isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}</span>
         </button>
 
-        {isOpen && (
-          <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
-            {/* Batch 3 addendum (2026-09-04 UAT): fields sit on a darker
-                --color-bg-elevated card, in a 2-column grid, with the
-                Cancel/Save pair INSIDE that card, matching
-                SavingsPotRow's own expanded form (SavingsPotForm) — the
-                red inline text buttons (Log a deposit/withdrawal,
-                recurring deposit) stay outside it, below. Batch 4
-                (2026-09-04 UAT): the bills/loans checklist used to be its
-                own red-inline-button-gated card here too — now folded
-                permanently into PotEditForm itself, see its own comment. */}
-            {/* Batch 6 (2026-09-07 UAT): action buttons moved above the
-                edit form to match Joint Account's card ordering — these
-                stay visible/reachable the instant the card expands,
-                rather than being pushed below the fields. */}
-            <LogTransferButton
-              fixedLocation={{ type: 'pot', potId: pot.id }}
-              locationOptions={locationOptions}
-              onLogDeposit={onLogDeposit}
-              onLogWithdrawal={onLogWithdrawal}
-              onLogged={triggerFlash}
-            />
-            <RecurringTransferEditor
-              location={{ type: 'pot', potId: pot.id }}
-              defaultName={pot.name}
-              templates={templates}
-              locationOptions={locationOptions}
-              onAdd={onAddRecurringTransfer}
-              onUpdate={onUpdateRecurringTemplate}
-              onRemove={onRemoveRecurringTemplate}
-              onSaved={triggerFlash}
-            />
+        {/* UAT 2026-09-08 (6-bug4-pots): these two action buttons now
+            render regardless of isOpen, matching Joint Account's own
+            always-visible buttons — only PotEditForm below stays gated
+            behind expanding the card. */}
+        <div className="mt-3 pt-3 border-t flex flex-col gap-3" style={{ borderColor: 'var(--color-track)' }}>
+          {/* Batch 3 addendum (2026-09-04 UAT): fields sit on a darker
+              --color-bg-elevated card, in a 2-column grid, with the
+              Cancel/Save pair INSIDE that card, matching
+              SavingsPotRow's own expanded form (SavingsPotForm) — the
+              red inline text buttons (Log a deposit/withdrawal,
+              recurring deposit) stay outside it, below. Batch 4
+              (2026-09-04 UAT): the bills/loans checklist used to be its
+              own red-inline-button-gated card here too — now folded
+              permanently into PotEditForm itself, see its own comment. */}
+          {/* Batch 6 (2026-09-07 UAT): action buttons moved above the
+              edit form to match Joint Account's card ordering — these
+              stay visible/reachable the instant the card expands,
+              rather than being pushed below the fields. */}
+          <LogTransferButton
+            fixedLocation={{ type: 'pot', potId: pot.id }}
+            locationOptions={locationOptions}
+            onLogDeposit={onLogDeposit}
+            onLogWithdrawal={onLogWithdrawal}
+            onLogged={triggerFlash}
+          />
+          <RecurringTransferEditor
+            location={{ type: 'pot', potId: pot.id }}
+            defaultName={pot.name}
+            templates={templates}
+            locationOptions={locationOptions}
+            onAdd={onAddRecurringTransfer}
+            onUpdate={onUpdateRecurringTemplate}
+            onRemove={onRemoveRecurringTemplate}
+            onSaved={triggerFlash}
+          />
 
+          {isOpen && (
             <PotEditForm
               pot={pot}
               templates={templates}
@@ -2071,8 +2093,8 @@ function PotRow({
               onAssignTemplateLocation={onAssignTemplateLocation}
               onAssignLoanLocation={onAssignLoanLocation}
             />
-          </div>
-        )}
+          )}
+        </div>
         <SavedFlashOverlay active={flashActive} />
       </div>
     </SwipeToDelete>
@@ -2367,6 +2389,17 @@ export function Salary() {
   // Log/Recurring" pattern as PotRow/SavingsPotRow, for the Joint Account
   // card (which lives inline in this component rather than its own row).
   const { active: jointFlashActive, trigger: triggerJointFlash } = useSavedFlash()
+  // UAT 2026-09-08 (9-wallet-pot-savings-joint): the very first Joint
+  // Account creation goes through AppGuards' own app-wide modal (see
+  // needsJointAccountSetup), not anything in this component, so there's
+  // no click handler here to hang a flash off. Detect the account
+  // actually appearing (mirrors every other card's "flash once, right
+  // after creation" behaviour) instead of watching for a specific action.
+  const jointAccountExistedRef = useRef(!!data.jointAccount)
+  useEffect(() => {
+    if (data.jointAccount && !jointAccountExistedRef.current) triggerJointFlash()
+    jointAccountExistedRef.current = !!data.jointAccount
+  }, [data.jointAccount, triggerJointFlash])
   const [editingDeduction, setEditingDeduction] = useState<{ personId: string; deductionId: string } | null>(null)
   const [settingsOpenFor, setSettingsOpenFor] = useState<string | null>(null)
   // Which person's Salary row / which Pension's row is expanded — one at
@@ -2378,6 +2411,8 @@ export function Salary() {
   // Batch 9 (2026-09-07, Bug 11) — see PensionRow's own comment on why a
   // brand-new pension flashes on MOUNT rather than at save time.
   const [justCreatedPensionId, setJustCreatedPensionId] = useState<string | null>(null)
+  const [justCreatedSavingsPotId, setJustCreatedSavingsPotId] = useState<string | null>(null)
+  const [justCreatedPotId, setJustCreatedPotId] = useState<string | null>(null)
   const [addingPension, setAddingPension] = useState(false)
   const [pickingPensionPerson, setPickingPensionPerson] = useState(false)
   const [pensionDefaultPersonId, setPensionDefaultPersonId] = useState(data.primaryPersonId)
@@ -2740,9 +2775,14 @@ export function Salary() {
               if (data.pensions.length === 0) setPensionsSectionOpen(false)
             }}
             onSave={(personId, fields) => {
+              // UAT 2026-09-08 (9-wallet-pension): used to force this row
+              // open (setExpandedPensionId) so the flash had something to
+              // show against — but that left it expanded after saving,
+              // unlike every other "new X" flash (Bills/Loans/Credit
+              // Cards), which flash their still-collapsed row on mount via
+              // shouldFlashOnMount instead. Matched that pattern here too.
               const id = addPension(personId, newPension({ personId, ...fields }))
               setAddingPension(false)
-              setExpandedPensionId(id)
               setJustCreatedPensionId(id)
             }}
           />
@@ -2830,6 +2870,7 @@ export function Salary() {
                 })
               }
               setAddingSavingsFor(null)
+              setJustCreatedSavingsPotId(id)
               // BUGFIX (Adam-reported, 2026-09 session — "I have to click
               // Looks good twice before the modal disappears and
               // collapses the card"). Traced this thoroughly: there's
@@ -2874,6 +2915,8 @@ export function Salary() {
               onAddRecurringTransfer={addRecurringTransfer}
               onUpdateRecurringTemplate={updateRecurringTemplate}
               onRemoveRecurringTemplate={removeRecurringTemplate}
+              shouldFlashOnMount={justCreatedSavingsPotId === pot.id}
+              onFlashedOnMount={() => setJustCreatedSavingsPotId(null)}
             />
           ))}
           {data.savingsPots.length === 0 && !addingSavingsFor && (
@@ -2931,7 +2974,11 @@ export function Salary() {
               const id = addPot(personId, newPot({ personId, name, openingBalance, openingDate }))
               for (const billId of billIdsToMoveIn) assignRecurringTemplateLocation(billId, 'pot', effectiveFrom, { potId: id })
               setAddingBillsPotFor(null)
-              setExpandedBillsPotId(id)
+              // UAT 2026-09-08 (9-wallet-pot-savings-joint): used to force
+              // this row open (setExpandedBillsPotId) — same fix as the
+              // Pension/Savings-Pot cases above, matched to the
+              // collapsed-row-flashes-on-mount pattern instead.
+              setJustCreatedPotId(id)
             }}
           />
         )}
@@ -2956,6 +3003,8 @@ export function Salary() {
               onAddRecurringTransfer={addRecurringTransfer}
               onUpdateRecurringTemplate={updateRecurringTemplate}
               onRemoveRecurringTemplate={removeRecurringTemplate}
+              shouldFlashOnMount={justCreatedPotId === pot.id}
+              onFlashedOnMount={() => setJustCreatedPotId(null)}
             />
           ))}
           {data.pots.length === 0 && !addingBillsPotFor && <p className="text-sm text-[var(--color-ink-muted)] text-center py-8">No pots yet.</p>}
@@ -3865,7 +3914,15 @@ function PayPeriodRow({
           onSaveAllFuture={onSaveAllFuture}
           editingDeduction={editingDeduction}
           setEditingDeduction={setEditingDeduction}
-          onFlash={triggerOwnFlash}
+          onFlash={(message) => {
+            // UAT 2026-09-08 (9-wallet-bonus/9-wallet-netpay): these two
+            // inline actions used to flash but leave the row expanded,
+            // unlike every other save action on this page (Salary Sort's
+            // own modal closing counts as its own "collapse"). Collapse
+            // the row here too, matching that pattern.
+            triggerOwnFlash(message)
+            onToggle()
+          }}
         />
       )}
       {sortOpen && (

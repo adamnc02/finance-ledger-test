@@ -17,6 +17,7 @@ import {
   MAX_CALIBRATION_LINES,
   scheduledLoanRecurringOverpaymentDates,
   setPausedLoanRecurringOverpaymentDates,
+  recentAndUpcomingLoanPaymentDates,
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
@@ -33,7 +34,7 @@ import { SwipeToDelete } from '../components/SwipeToDelete'
 import { ConfirmModal } from '../components/ConfirmModal'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { PausedOccurrencesControl } from '../components/PausedOccurrencesControl'
-import { RecurringChangeConfirmModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
+import { RecurringChangeConfirmModal, EffectiveDateOccurrenceModal, type RecurringChangeField } from '../components/RecurringChangeConfirmModal'
 import { CollapsibleSection } from '../components/CollapsibleSection'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
 import { peopleWithIncomeCount } from '../lib/household'
@@ -571,9 +572,13 @@ function LoanRow({
           <div className="h-full rounded-full" style={{ width: `${progress.percentPaid}%`, background: 'var(--color-coral)' }} />
         </div>
 
-        {isOpen && (
-          <LoanEditPanel
+        {/* UAT 2026-09-08 (6-bug4-loans): this panel now always mounts —
+            its own `isOpen` prop gates just the Name/Amount/etc. fields
+            grid, so the log/recurring-overpayment and Settle actions stay
+            visible on the collapsed card too, matching Joint Account. */}
+        <LoanEditPanel
             loan={loan}
+            isOpen={isOpen}
             categories={categories}
             people={people}
             pots={pots}
@@ -590,22 +595,29 @@ function LoanRow({
               triggerFlash()
             }}
             onLogOverpayment={(amount, date, note, recastMode) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui): this was
+              // the one action here that flashed but left the whole loan
+              // card expanded, unlike Save/Settle above. Guarded on isOpen
+              // now that this action is reachable from a collapsed card
+              // too — must never OPEN the card, only collapse it if it
+              // was already open.
               onLogOverpayment(amount, date, note, recastMode)
+              if (isOpen) onToggle()
               triggerFlash()
             }}
             onUpdateOverpayment={onUpdateOverpayment}
             onRemoveOverpayment={onRemoveOverpayment}
             onSettle={(amount, date, note) => {
               onSettle(amount, date, note)
-              onToggle()
+              if (isOpen) onToggle()
               triggerFlash('Loan settled')
             }}
             onCalibrate={onCalibrate}
             onCalibrated={() => triggerFlash('Calibration saved')}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
@@ -691,10 +703,12 @@ function CreditCardRow({
 
         {ledgerOpen && <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />}
 
-        {isOpen && (
-          <CreditCardEditPanel
+        {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
+            LoanEditPanel's own comment on the same pattern. */}
+        <CreditCardEditPanel
             storedCard={storedCard}
             card={card}
+            isOpen={isOpen}
             transactions={transactions}
             people={people}
             categories={categories}
@@ -707,13 +721,17 @@ function CreditCardRow({
             onUpdateLumpPayment={onUpdateLumpPayment}
             onRemoveLumpPayment={onRemoveLumpPayment}
             onLogLumpPayment={(amount, date, note) => {
+              // UAT 2026-09-08 (followup-loan-overpayment-ui, same root
+              // cause on the credit card's analogous action). Guarded on
+              // isOpen now that this is reachable from a collapsed card.
               onLogLumpPayment(amount, date, note)
+              if (isOpen) onToggle()
               triggerFlash()
             }}
             overpaymentPrefill={overpaymentPrefill}
             onPrefillConsumed={onPrefillConsumed}
+            onCancel={() => isOpen && onToggle()}
           />
-        )}
 
         <SavedFlashOverlay active={flashActive} message={flashMessage} />
       </div>
@@ -742,6 +760,7 @@ function loanLocationLabel(location: BillLocation, potId: string | undefined, po
 
 function LoanEditPanel({
   loan,
+  isOpen,
   categories,
   people,
   pots,
@@ -757,8 +776,15 @@ function LoanEditPanel({
   onCalibrated,
   overpaymentPrefill,
   onPrefillConsumed,
+  onCancel,
 }: {
   loan: Loan
+  /** UAT 2026-09-08 (6-bug4-loans) — gates only the Name/Amount/etc.
+   * fields grid + its own Save button; the action buttons/lists above it
+   * (log/recurring overpayment, Settle) render regardless, matching Joint
+   * Account's always-visible action buttons. This panel is now always
+   * mounted once expandable at all — see LoanRow's own call site. */
+  isOpen: boolean
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   people: { id: string; name: string }[]
   pots: Pot[]
@@ -775,6 +801,9 @@ function LoanEditPanel({
   onCalibrated?: () => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving. */
+  onCancel: () => void
 }) {
   // A 'recurring' prefill (from the What-if page's "Make this a real
   // recurring overpayment" button) seeds the draft's recurringOverpayment
@@ -804,7 +833,11 @@ function LoanEditPanel({
   // closely analogous pot-creation flow was itself just "date picker,
   // default to today," so this stays proportionate rather than building
   // a parallel picker UI for one field.
-  const [locationEffectiveFrom, setLocationEffectiveFrom] = useState(todayIso())
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note): replaced by a picker-
+  // first flow (see choosingLocationEffectiveDate below), matching Bills/
+  // Pots — this bare date field with no occurrence list to anchor to was
+  // the specific thing Adam asked to remove.
+  const [choosingLocationEffectiveDate, setChoosingLocationEffectiveDate] = useState(false)
   // Batch 7 (2026-09-07, Bug 8 app-wide sweep) — same "are you sure, here's
   // what's changing" confirmation Bills.tsx's BillEditPanel now shows
   // before a location reassignment commits, extended to loans per Adam's
@@ -812,7 +845,7 @@ function LoanEditPanel({
   // transactions / loans / transfers"). Holds a closure that performs the
   // exact same commit this Save button always did, so it's the confirm
   // modal — not this button — that actually applies the change.
-  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  const [pendingLocationConfirm, setPendingLocationConfirm] = useState<{ effectiveFrom: string; changes: RecurringChangeField[]; commit: (effectiveFrom: string) => void } | null>(null)
 
   // Prefill only needs to seed the initial draft/form state above — once
   // this panel has mounted with it, tell the parent to forget it so a
@@ -822,8 +855,33 @@ function LoanEditPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // UAT 2026-09-08 (6-bug4-loans): this panel now stays mounted while the
+  // card is collapsed (see `isOpen`'s own comment) rather than unmounting
+  // and losing its draft the way it used to — so an abandoned field edit
+  // (Cancel, or just tapping the header to collapse without saving) needs
+  // an explicit reset instead of relying on a fresh mount to provide one.
+  useEffect(() => {
+    if (!isOpen) {
+      setDraft(draftFromLoan(loan))
+      setChoosingLocationEffectiveDate(false)
+      setPendingLocationConfirm(null)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
+
   function update(patch: Partial<LoanDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
+  }
+
+  // UAT 2026-09-08 (7-bug8.2-confirm-loans note, same fix as Bills.tsx's
+  // own cancelEverything) — Cancel on the location date picker or the
+  // confirm modal must fully discard the edit and collapse the card, not
+  // just step back to the previous screen.
+  function cancelEverything() {
+    setDraft(draftFromLoan(loan))
+    setChoosingLocationEffectiveDate(false)
+    setPendingLocationConfirm(null)
+    onCancel()
   }
 
   // Live preview of the schedule impact of unsaved edits — merges the draft
@@ -884,6 +942,8 @@ function LoanEditPanel({
         </p>
       )}
 
+      {isOpen && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Lender (optional)" value={draft.lender ?? ''} onChange={(v) => update({ lender: v || undefined })} />
@@ -936,14 +996,6 @@ function LoanEditPanel({
         payeeSharePercent={draft.payeeSharePercent}
         onChange={update}
       />
-      {/* Pots backlog item (2026-09 session) — governs ONLY this loan's
-          own regular monthlyPayment; a recurring overpayment has its own,
-          independent location field further down in
-          RecurringOverpaymentEditor. */}
-      {(draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)) && (
-        <EditField label="Location change takes effect from" type="date" value={locationEffectiveFrom} onChange={setLocationEffectiveFrom} />
-      )}
-
       {calibratingLoan && (
         <CalibrationModal
           loanName={loan.name}
@@ -954,41 +1006,64 @@ function LoanEditPanel({
         />
       )}
 
+      {/* UAT 2026-09-08 (7-bug8.2-confirm-loans note) — picker-first list
+          of real upcoming payment dates, replacing the plain "changes
+          take effect from" calendar field, matching Bills/Pots. */}
+      {choosingLocationEffectiveDate && (
+        <EffectiveDateOccurrenceModal
+          description={`${loan.name} is moving to ${loanLocationLabel(draft.location, draft.potId, pots)}. Which payment should this start from? Everything before it — including already-cleared payments — stays where it was.`}
+          occurrences={recentAndUpcomingLoanPaymentDates(loan, new Date())}
+          onCancel={cancelEverything}
+          onChoose={(effectiveFrom) => {
+            setPendingLocationConfirm({
+              effectiveFrom,
+              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
+              commit: (effectiveFrom) => {
+                onAssignLocation(draft.location, effectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
+                const { location: _l, potId: _p, ...rest } = draft
+                onSave(rest)
+              },
+            })
+            setChoosingLocationEffectiveDate(false)
+          }}
+        />
+      )}
+
       {pendingLocationConfirm && (
         <RecurringChangeConfirmModal
-          effectiveFrom={locationEffectiveFrom}
+          effectiveFrom={pendingLocationConfirm.effectiveFrom}
           changes={pendingLocationConfirm.changes}
-          affectsClearedBalance={locationEffectiveFrom <= todayIso()}
-          onCancel={() => setPendingLocationConfirm(null)}
+          affectsClearedBalance={pendingLocationConfirm.effectiveFrom <= todayIso()}
+          onCancel={cancelEverything}
           onConfirm={() => {
-            pendingLocationConfirm.commit()
+            pendingLocationConfirm.commit(pendingLocationConfirm.effectiveFrom)
             setPendingLocationConfirm(null)
           }}
         />
       )}
 
-      <button
-        disabled={!dirty}
-        onClick={() => {
+      <FormButtonRow
+        onCancel={onCancel}
+        saveDisabled={!dirty}
+        onSave={() => {
           const locationChanged = draft.location !== loan.location || (draft.location === 'pot' && draft.potId !== loan.potId)
-          if (locationChanged) {
-            setPendingLocationConfirm({
-              changes: [{ label: 'Location', from: loanLocationLabel(loan.location, loan.potId, pots), to: loanLocationLabel(draft.location, draft.potId, pots) }],
-              commit: () => {
-                onAssignLocation(draft.location, locationEffectiveFrom, draft.location === 'pot' ? draft.potId : undefined)
-                const { location: _l, potId: _p, ...rest } = draft
-                onSave(rest)
-              },
-            })
-          } else {
+          if (!locationChanged) {
             onSave(draft)
+            return
           }
+          // No occurrences to anchor a date to yet — apply immediately,
+          // dated today, same "nothing to pick from" guard Bills.tsx uses.
+          if (recentAndUpcomingLoanPaymentDates(loan, new Date()).length === 0) {
+            onAssignLocation(draft.location, todayIso(), draft.location === 'pot' ? draft.potId : undefined)
+            const { location: _l, potId: _p, ...rest } = draft
+            onSave(rest)
+            return
+          }
+          setChoosingLocationEffectiveDate(true)
         }}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+      />
+        </>
+      )}
     </div>
   )
 }
@@ -1013,6 +1088,8 @@ function CreditCardEditPanel({
   onLogLumpPayment,
   overpaymentPrefill,
   onPrefillConsumed,
+  isOpen,
+  onCancel,
 }: {
   card: CreditCard // live — used for the derived-balance caption only
   storedCard: CreditCard // as persisted — what the draft is seeded from and saved back to
@@ -1026,6 +1103,13 @@ function CreditCardEditPanel({
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
+  /** UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's own comment on
+   * the identical prop. */
+  isOpen: boolean
+  /** UAT 2026-09-08 (7-bug8.2-confirm-loans note) — this fields form had
+   * no Cancel at all; collapses the card without saving, matching every
+   * other card's edit form. */
+  onCancel: () => void
 }) {
   // Seeded from the STORED card, never the live one. This distinction is
   // the whole point of the fix: the editable field is the stated anchor,
@@ -1048,6 +1132,12 @@ function CreditCardEditPanel({
     if (overpaymentPrefill) onPrefillConsumed()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's identical comment.
+  useEffect(() => {
+    if (!isOpen) setDraft(draftFromCard(storedCard))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen])
 
   function update(patch: Partial<CreditCardDraft>) {
     setDraft((d) => ({ ...d, ...patch }))
@@ -1076,6 +1166,8 @@ function CreditCardEditPanel({
         />
       )}
 
+      {isOpen && (
+        <>
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
@@ -1151,14 +1243,9 @@ function CreditCardEditPanel({
         </label>
       )}
 
-      <button
-        disabled={!dirty}
-        onClick={() => onSave(draft)}
-        className="w-full py-2.5 rounded-full text-sm font-semibold text-white disabled:opacity-40"
-        style={{ background: 'var(--color-coral)' }}
-      >
-        Save
-      </button>
+      <FormButtonRow onCancel={onCancel} onSave={() => onSave(draft)} saveDisabled={!dirty} />
+        </>
+      )}
     </div>
   )
 }
@@ -1816,6 +1903,22 @@ function RecurringOverpaymentEditor({
   // than a fact about a specific past payment"), so this confirms then
   // applies immediately, it doesn't ask for a date to anchor to.
   const [pendingOverpaymentLocationConfirm, setPendingOverpaymentLocationConfirm] = useState<{ changes: RecurringChangeField[]; commit: () => void } | null>(null)
+  // UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-location
+  // note) — this editor's fields (amount, Paid from, payment date, end
+  // date) used to write straight through onChange on every keystroke,
+  // with no Save/Cancel at all; the "Paid from" dropdown alone got a
+  // confirm modal, but nothing actually gated committing to it. Now a
+  // real draft-then-save card, collapsed by default, matching every
+  // other editable card in the app — Remove/Change-recast/paused-dates
+  // stay as their own immediate actions below, unaffected.
+  const [editorOpen, setEditorOpen] = useState(false)
+  const [fieldsDraft, setFieldsDraft] = useState<{
+    amount: LoanRecurringOverpayment['amount']
+    location: 'personal' | 'pot' | undefined
+    potId: string | undefined
+    startDate: string
+    endDate: string | undefined
+  } | null>(null)
   // Held separately from `value` itself: the amount has to be chosen
   // BEFORE a LoanRecurringOverpayment is created at all — confirmed as a
   // real bug that the old flow skipped straight to the recast-choice
@@ -2023,6 +2126,8 @@ function RecurringOverpaymentEditor({
           onClick={() => {
             onChange(undefined)
             setShowEndDate(false)
+            setEditorOpen(false)
+            setFieldsDraft(null)
           }}
           className="text-xs"
           style={{ color: 'var(--color-negative)' }}
@@ -2037,100 +2142,140 @@ function RecurringOverpaymentEditor({
         </button>
       </div>
 
-      <div className="flex gap-2">
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'fixed' ? value.amount : { type: 'fixed', amount: 50 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{ background: value.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: value.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
-        >
-          Fixed amount
-        </button>
-        <button
-          onClick={() => onChange({ ...value, amount: value.amount.type === 'percent_of_balance' ? value.amount : { type: 'percent_of_balance', percent: 5 } })}
-          className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
-          style={{
-            background: value.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
-            color: value.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
-          }}
-        >
-          % of remaining balance
-        </button>
-      </div>
-
-      {value.amount.type === 'fixed' ? (
-        <EditField label="Amount (£)" type="number" value={value.amount.amount} onChange={(v) => onChange({ ...value, amount: { type: 'fixed', amount: Number(v) } })} />
-      ) : (
-        <EditField
-          label="Percent (%)"
-          type="number"
-          value={value.amount.percent}
-          onChange={(v) => onChange({ ...value, amount: { type: 'percent_of_balance', percent: Number(v) } })}
-        />
-      )}
-
-      {/* Pots backlog item (2026-09 session) — independent of the loan's
-          OWN location (Adam-specified: "if a loan is tagged to a pot,
-          that means ONLY the monthly payment is paid from the pot, not
-          necessarily recurring overpayments"). Absent/'Follows loan' is
-          the field's own documented default (see
-          LoanRecurringOverpayment.location in types/ledger.ts) — nothing
-          is lost by leaving this alone, it just means "same place as the
-          regular payment," exactly what already happened before this
-          field existed. A flat overwrite, not effective-dated — see that
-          same type comment for why. */}
-      {/* UAT follow-up (2026-09-05, Adam-reported): used to be gated on
-          `ownerPots.length > 0` too — "Follows the loan's own location"
-          and "Personal" are real choices even with no pot, so this field
-          always shows now, matching the creation wizard's own fix. */}
-      <label className="flex flex-col gap-1">
-        <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
-        <select
-          value={value.location === 'pot' ? `pot:${value.potId ?? ''}` : (value.location ?? '')}
-          onChange={(e) => {
-            const raw = e.target.value
-            const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
-              raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
-            setPendingOverpaymentLocationConfirm({
-              changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(next.location, next.potId) }],
-              commit: () => onChange({ ...value, location: next.location, potId: next.potId }),
-            })
-          }}
-          className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
-        >
-          <option value="" style={{ color: '#000' }}>
-            Follows the loan's own location
-          </option>
-          <option value="personal" style={{ color: '#000' }}>
-            Personal
-          </option>
-          {ownerPots.map((p) => (
-            <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
-              {p.name}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <div className="grid grid-cols-2 gap-2">
-        <EditField label="Payment date" type="date" value={value.startDate} onChange={(v) => onChange({ ...value, startDate: v })} />
-        {showEndDate ? (
-          <EditField label="End date" type="date" value={value.endDate ?? ''} onChange={(v) => onChange({ ...value, endDate: v || undefined })} />
-        ) : (
-          <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
-            + Set an end date
-          </button>
-        )}
-      </div>
-      {showEndDate && value.endDate && (
+      {/* UAT 2026-09-08 (followup-confirm-loan-recurring-overpayment-
+          location note) — amount/Paid from/dates used to write straight
+          through onChange live; now a collapsed summary that opens into a
+          real draft with its own Save/Cancel, matching every other
+          editable card. */}
+      {!editorOpen ? (
         <button
           onClick={() => {
-            onChange({ ...value, endDate: undefined })
-            setShowEndDate(false)
+            setFieldsDraft({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })
+            setEditorOpen(true)
           }}
-          className="self-start text-xs text-[var(--color-ink-muted)]"
+          className="w-full text-left px-3 py-2 rounded-xl text-xs"
+          style={{ background: 'var(--color-surface)', color: 'var(--color-ink)' }}
         >
-          Clear end date (run indefinitely)
+          {value.amount.type === 'fixed' ? `£${formatCurrency(value.amount.amount)}` : `${value.amount.percent}% of balance`} · {overpaymentLocationLabel(value.location, value.potId)} · from{' '}
+          {value.startDate}
+          {value.endDate ? ` to ${value.endDate}` : ''}
         </button>
+      ) : (
+        fieldsDraft && (
+          <div className="flex flex-col gap-2">
+            <div className="flex gap-2">
+              <button
+                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'fixed' ? d.amount : { type: 'fixed', amount: 50 } } : d))}
+                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+                style={{ background: fieldsDraft.amount.type === 'fixed' ? 'var(--color-coral)' : 'var(--color-surface)', color: fieldsDraft.amount.type === 'fixed' ? '#fff' : 'var(--color-ink-muted)' }}
+              >
+                Fixed amount
+              </button>
+              <button
+                onClick={() => setFieldsDraft((d) => (d ? { ...d, amount: d.amount.type === 'percent_of_balance' ? d.amount : { type: 'percent_of_balance', percent: 5 } } : d))}
+                className="flex-1 py-1.5 rounded-full text-xs font-medium transition-colors"
+                style={{
+                  background: fieldsDraft.amount.type === 'percent_of_balance' ? 'var(--color-coral)' : 'var(--color-surface)',
+                  color: fieldsDraft.amount.type === 'percent_of_balance' ? '#fff' : 'var(--color-ink-muted)',
+                }}
+              >
+                % of remaining balance
+              </button>
+            </div>
+
+            {fieldsDraft.amount.type === 'fixed' ? (
+              <EditField
+                label="Amount (£)"
+                type="number"
+                value={fieldsDraft.amount.amount}
+                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'fixed', amount: Number(v) } } : d))}
+              />
+            ) : (
+              <EditField
+                label="Percent (%)"
+                type="number"
+                value={fieldsDraft.amount.percent}
+                onChange={(v) => setFieldsDraft((d) => (d ? { ...d, amount: { type: 'percent_of_balance', percent: Number(v) } } : d))}
+              />
+            )}
+
+            {/* Pots backlog item (2026-09 session) — independent of the
+                loan's OWN location (Adam-specified: "if a loan is tagged
+                to a pot, that means ONLY the monthly payment is paid from
+                the pot, not necessarily recurring overpayments").
+                Absent/'Follows loan' is the field's own documented
+                default (see LoanRecurringOverpayment.location in
+                types/ledger.ts) — a flat overwrite, not effective-dated —
+                see that same type comment for why. */}
+            <label className="flex flex-col gap-1">
+              <span className="text-xs text-[var(--color-ink-muted)]">Paid from</span>
+              <select
+                value={fieldsDraft.location === 'pot' ? `pot:${fieldsDraft.potId ?? ''}` : (fieldsDraft.location ?? '')}
+                onChange={(e) => {
+                  const raw = e.target.value
+                  const next: { location: 'personal' | 'pot' | undefined; potId: string | undefined } =
+                    raw === '' ? { location: undefined, potId: undefined } : raw === 'personal' ? { location: 'personal', potId: undefined } : { location: 'pot', potId: raw.slice(4) }
+                  setFieldsDraft((d) => (d ? { ...d, ...next } : d))
+                }}
+                className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
+              >
+                <option value="" style={{ color: '#000' }}>
+                  Follows the loan's own location
+                </option>
+                <option value="personal" style={{ color: '#000' }}>
+                  Personal
+                </option>
+                {ownerPots.map((p) => (
+                  <option key={p.id} value={`pot:${p.id}`} style={{ color: '#000' }}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <div className="grid grid-cols-2 gap-2">
+              <EditField label="Payment date" type="date" value={fieldsDraft.startDate} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, startDate: v } : d))} />
+              {showEndDate ? (
+                <EditField label="End date" type="date" value={fieldsDraft.endDate ?? ''} onChange={(v) => setFieldsDraft((d) => (d ? { ...d, endDate: v || undefined } : d))} />
+              ) : (
+                <button onClick={() => setShowEndDate(true)} className="self-end text-xs font-medium pb-1" style={{ color: 'var(--color-coral)' }}>
+                  + Set an end date
+                </button>
+              )}
+            </div>
+            {showEndDate && fieldsDraft.endDate && (
+              <button onClick={() => setFieldsDraft((d) => (d ? { ...d, endDate: undefined } : d))} className="self-start text-xs text-[var(--color-ink-muted)]">
+                Clear end date (run indefinitely)
+              </button>
+            )}
+
+            <FormButtonRow
+              onCancel={() => {
+                setFieldsDraft(null)
+                setShowEndDate(!!value.endDate)
+                setEditorOpen(false)
+              }}
+              saveDisabled={JSON.stringify(fieldsDraft) === JSON.stringify({ amount: value.amount, location: value.location, potId: value.potId, startDate: value.startDate, endDate: value.endDate })}
+              onSave={() => {
+                const draft = fieldsDraft
+                const locationChanged = draft.location !== value.location || (draft.location === 'pot' && draft.potId !== value.potId)
+                const commit = () => {
+                  onChange({ ...value, amount: draft.amount, location: draft.location, potId: draft.potId, startDate: draft.startDate, endDate: draft.endDate })
+                  setFieldsDraft(null)
+                  setEditorOpen(false)
+                }
+                if (locationChanged) {
+                  setPendingOverpaymentLocationConfirm({
+                    changes: [{ label: 'Paid from', from: overpaymentLocationLabel(value.location, value.potId), to: overpaymentLocationLabel(draft.location, draft.potId) }],
+                    commit,
+                  })
+                } else {
+                  commit()
+                }
+              }}
+            />
+          </div>
+        )
       )}
 
       {/* Ad-hoc individual skips (Phase 4) — distinct from the end date
