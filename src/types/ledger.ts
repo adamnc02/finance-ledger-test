@@ -552,6 +552,19 @@ export interface Loan {
   id: string
   name: string
   monthlyPayment: number
+  // Historized effective-dating for the loan's own standing payment
+  // amount (2026-09-09, unified effective-dating work) — mirrors
+  // RecurringTemplate's amountEffectiveFrom/amountHistory exactly (same
+  // field shapes, same resolution rule in ledgerLoans.ts's
+  // resolveMonthlyPayment). buildLoanSchedule walks this per-period so a
+  // change only reaches periods on/after `effectiveFrom`; anything
+  // before keeps whatever payment was actually in effect at the time,
+  // the same guarantee Bills already gives its own amount changes. Only
+  // `monthlyPayment` gets this (not apr/termMonths — Adam's own call:
+  // those describe what the loan always contractually was, not a new
+  // arrangement starting from a chosen date).
+  monthlyPaymentEffectiveFrom?: string
+  monthlyPaymentHistory?: { effectiveFrom: string; amount: number }[]
   termMonths: number
   startDate: string // ISO date of first payment
   // Derived at render time from monthlyPayment × termMonths, adjusted for
@@ -635,6 +648,22 @@ export interface LoanRecurringOverpayment {
   // arrangement is over, the very next scheduled date still applies.
   pausedDates?: string[]
   amount: { type: 'fixed'; amount: number } | { type: 'percent_of_balance'; percent: number }
+  // Historized effective-dating for the recurring overpayment's own
+  // standing amount (2026-09-09, unified effective-dating work) — same
+  // amountEffectiveFrom/amountHistory shape as RecurringTemplate/Loan,
+  // just carrying the whole tagged `amount` union per entry rather than a
+  // plain number, since this field can be fixed or percent-of-balance.
+  // Resolved per-period in ledgerLoans.ts's recurringOverpaymentForDate
+  // via resolveRecurringOverpaymentAmount.
+  amountEffectiveFrom?: string
+  amountHistory?: { effectiveFrom: string; amount: LoanRecurringOverpayment['amount'] }[]
+  // A true single-occurrence amount change ("just a single payment") —
+  // unlike Loan.monthlyPayment, a recurring overpayment DOES get this
+  // (Adam's own call): a small side-table entry keyed to one exact
+  // payment date, leaving amount/amountHistory completely untouched.
+  // Mirrors RecurringTemplate.occurrenceOverrides' shape, minus the
+  // date-move/delete fields, which don't apply here.
+  amountOverrides?: { date: string; amount: LoanRecurringOverpayment['amount'] }[]
   // Recast choice (loan-amortisation-engine scope §9, §11.3) — how the
   // schedule responds once this overpayment lands. 'reduce_term'
   // (default when absent, matching every recurring overpayment recorded
