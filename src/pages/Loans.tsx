@@ -21,7 +21,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, buildCreditCardBalanceDueRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickCreditCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type LoanRecurringOverpayment, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -156,8 +156,6 @@ export function Loans() {
     updateLoan,
     removeLoan,
     logLoanOverpayment,
-    updateLoanOverpayment,
-    removeLoanOverpayment,
     settleLoanAction,
     calibrateLoanAction,
     addCreditCard,
@@ -165,8 +163,6 @@ export function Loans() {
     updateCreditCardMinimumCharge,
     removeCreditCard,
     logCreditCardLumpPayment,
-    removeCreditCardLumpPayment,
-    updateCreditCardLumpPayment,
     addCategory,
     assignLoanLocation,
   } = useLedgerData()
@@ -348,8 +344,6 @@ export function Loans() {
                 onSave={(u) => updateLoan(loan.id, u)}
                 onAssignLocation={(location, effectiveFrom, potId) => assignLoanLocation(loan.id, location, effectiveFrom, { potId })}
                 onLogOverpayment={(amount, date, note, recastMode) => logLoanOverpayment(loan.id, amount, date, note, recastMode)}
-                onUpdateOverpayment={(overpaymentId, amount, date, note) => updateLoanOverpayment(loan.id, overpaymentId, amount, date, note)}
-                onRemoveOverpayment={(overpaymentId) => removeLoanOverpayment(loan.id, overpaymentId)}
                 onSettle={(amount, date, note) => settleLoanAction(loan.id, amount, date, note)}
                 onCalibrate={(lines) => calibrateLoanAction(loan.id, lines)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'loan' && overpaymentPrefill.targetId === loan.id ? overpaymentPrefill : null}
@@ -441,8 +435,6 @@ export function Loans() {
                 transactions={data.transactions}
                 onAddCategory={addCategory}
                 onSave={(u) => updateCreditCard(card.id, u)}
-                onUpdateLumpPayment={(lumpPaymentId, amount, date, note) => updateCreditCardLumpPayment(card.id, lumpPaymentId, amount, date, note)}
-                onRemoveLumpPayment={(lumpPaymentId) => removeCreditCardLumpPayment(card.id, lumpPaymentId)}
                 onLogLumpPayment={(amount, date, note) => logCreditCardLumpPayment(card.id, amount, date, note)}
                 onUpdateMinimumCharge={(date, amount) => updateCreditCardMinimumCharge(card.id, date, amount)}
                 overpaymentPrefill={overpaymentPrefill?.targetKind === 'credit_card' && overpaymentPrefill.targetId === card.id ? overpaymentPrefill : null}
@@ -488,8 +480,6 @@ function LoanRow({
   onSave,
   onAssignLocation,
   onLogOverpayment,
-  onUpdateOverpayment,
-  onRemoveOverpayment,
   onSettle,
   onCalibrate,
   overpaymentPrefill,
@@ -512,8 +502,6 @@ function LoanRow({
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
   onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
-  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveOverpayment: (overpaymentId: string) => void
   onSettle: (amount: number, date: string, note?: string) => void
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   overpaymentPrefill: OverpaymentPrefill | null
@@ -605,8 +593,6 @@ function LoanRow({
               if (isOpen) onToggle()
               triggerFlash()
             }}
-            onUpdateOverpayment={onUpdateOverpayment}
-            onRemoveOverpayment={onRemoveOverpayment}
             onSettle={(amount, date, note) => {
               onSettle(amount, date, note)
               if (isOpen) onToggle()
@@ -650,8 +636,6 @@ function CreditCardRow({
   transactions,
   onAddCategory,
   onSave,
-  onUpdateLumpPayment,
-  onRemoveLumpPayment,
   onLogLumpPayment,
   onUpdateMinimumCharge,
   overpaymentPrefill,
@@ -670,8 +654,6 @@ function CreditCardRow({
   transactions: Transaction[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
-  onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
   onUpdateMinimumCharge: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
@@ -715,17 +697,7 @@ function CreditCardRow({
         </div>
 
         {ledgerOpen && (
-          <CreditCardLedgerModal
-            card={card}
-            transactions={transactions}
-            onUpdateMinimumCharge={onUpdateMinimumCharge}
-            onClearBalance={(date, amount) => {
-              onLogLumpPayment(amount, date, 'Statement cleared')
-              triggerFlash()
-              setLedgerOpen(false)
-            }}
-            onClose={() => setLedgerOpen(false)}
-          />
+          <CreditCardLedgerModal card={card} transactions={transactions} onUpdateMinimumCharge={onUpdateMinimumCharge} onClose={() => setLedgerOpen(false)} />
         )}
 
         {/* UAT 2026-09-08 (6-bug4-cards): always mounted now — see
@@ -743,14 +715,16 @@ function CreditCardRow({
               onToggle()
               triggerFlash()
             }}
-            onUpdateLumpPayment={onUpdateLumpPayment}
-            onRemoveLumpPayment={onRemoveLumpPayment}
             onLogLumpPayment={(amount, date, note) => {
               // UAT 2026-09-08 (followup-loan-overpayment-ui, same root
               // cause on the credit card's analogous action). Guarded on
               // isOpen now that this is reachable from a collapsed card.
               onLogLumpPayment(amount, date, note)
               if (isOpen) onToggle()
+              triggerFlash()
+            }}
+            onClearBalance={(date, amount) => {
+              onLogLumpPayment(amount, date, 'Statement cleared')
               triggerFlash()
             }}
             overpaymentPrefill={overpaymentPrefill}
@@ -794,8 +768,6 @@ function LoanEditPanel({
   onSave,
   onAssignLocation,
   onLogOverpayment,
-  onUpdateOverpayment,
-  onRemoveOverpayment,
   onSettle,
   onCalibrate,
   onCalibrated,
@@ -819,8 +791,6 @@ function LoanEditPanel({
   onSave: (u: Partial<Omit<Loan, 'id' | 'overpayments'>>) => void
   onAssignLocation: (location: BillLocation, effectiveFrom: string, potId?: string) => void
   onLogOverpayment: (amount: number, date: string, note?: string, recastMode?: 'reduce_term' | 'reduce_payment') => void
-  onUpdateOverpayment: (overpaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveOverpayment: (overpaymentId: string) => void
   onSettle: (amount: number, date: string, note?: string) => void
   onCalibrate: (lines: StatementCalibrationLine[]) => CalibrationResult | null
   /** Batch 9 (2026-09-07, Bug 11) — see CalibrationModal's own comment. */
@@ -928,8 +898,13 @@ function LoanEditPanel({
           Settle this loan) moved above the edit-form fields to match Joint
           Account's card ordering — visible immediately on expand, not
           pushed below the fields grid. */}
-      {/* Editable, matching how a credit card's logged lump payments appear — each overpayment is its own row, tappable to edit or delete, not just a rolled-up summary line. */}
-      <LoggedPaymentList payments={loan.overpayments} onUpdate={onUpdateOverpayment} onRemove={onRemoveOverpayment} />
+      {/* 2026-09-09 session (Adam-specified) — the past-overpayments list
+          used to sit here, inline in the expanded card; it now lives on
+          the Transactions page's Transfers tab instead, mirroring how a
+          pot/savings pot/joint account deposit doesn't show its own
+          inline history on the Wallet page either — only on Transactions.
+          The one-off log button/form and the recurring editor below stay
+          right here, unchanged. */}
       {!loggingOverpayment ? (
         <button onClick={() => setLoggingOverpayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
           + Log an overpayment
@@ -1127,9 +1102,8 @@ function CreditCardEditPanel({
   categories,
   onAddCategory,
   onSave,
-  onUpdateLumpPayment,
-  onRemoveLumpPayment,
   onLogLumpPayment,
+  onClearBalance,
   overpaymentPrefill,
   onPrefillConsumed,
   isOpen,
@@ -1142,9 +1116,11 @@ function CreditCardEditPanel({
   categories: { id: string; name: string; icon: string; iconColor: string }[]
   onAddCategory: (name: string) => { id: string }
   onSave: (u: Partial<Omit<CreditCard, 'id' | 'lumpPayments' | 'active'>>) => void
-  onUpdateLumpPayment: (lumpPaymentId: string, amount: number, date: string, note?: string) => void
-  onRemoveLumpPayment: (lumpPaymentId: string) => void
   onLogLumpPayment: (amount: number, date: string, note?: string) => void
+  /** 2026-09-09 session — logs an overpayment for the FULL balance due on
+   * that date (not just that date's minimum), dated on it. Moved here
+   * from the (now minimum-charges-only) info modal, per Adam's spec. */
+  onClearBalance: (date: string, amount: number) => void
   overpaymentPrefill: OverpaymentPrefill | null
   onPrefillConsumed: () => void
   /** UAT 2026-09-08 (6-bug4-cards) — see LoanEditPanel's own comment on
@@ -1191,8 +1167,10 @@ function CreditCardEditPanel({
     <div className="mt-4 flex flex-col gap-3">
       {/* Batch 6 (2026-09-07 UAT): "+ Log a payment" moved above the
           edit-form fields to match Joint Account's card ordering —
-          visible immediately on expand, not pushed below the fields grid. */}
-      <LumpPaymentList payments={card.lumpPayments} onUpdate={onUpdateLumpPayment} onRemove={onRemoveLumpPayment} />
+          visible immediately on expand, not pushed below the fields grid.
+          2026-09-09 session — the past-payments list that used to sit
+          here moved to the Transactions page's Transfers tab, same
+          reasoning as LoanEditPanel's identical change just above. */}
       {!loggingPayment ? (
         <button onClick={() => setLoggingPayment(true)} className="text-xs font-medium self-start" style={{ color: 'var(--color-coral)' }}>
           + Log a payment
@@ -1212,6 +1190,8 @@ function CreditCardEditPanel({
 
       {isOpen && (
         <>
+      <CreditCardDueSection card={card} transactions={transactions} onClearBalance={onClearBalance} />
+
       <div className="grid grid-cols-2 gap-3">
         <EditField label="Name" value={draft.name} onChange={(v) => update({ name: v })} />
         <EditField label="Interest rate (% APR)" type="number" value={draft.interestRatePercent} onChange={(v) => update({ interestRatePercent: Number(v) })} />
@@ -1289,6 +1269,81 @@ function CreditCardEditPanel({
 
       <FormButtonRow onCancel={onCancel} onSave={() => onSave(draft)} saveDisabled={!dirty} />
         </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * "Payment due" (2026-09-09 session, Adam-specified) — the most recent
+ * plus next 3 upcoming (or next 4 if there's no recent one) payment due
+ * dates and their balance due, styled after the Salary page's
+ * PayPeriodsSection ("Most recent pay" / "Upcoming pay"). No tap-to-
+ * expand — this is a plain read-only overview — the one interactive bit
+ * carried over is the same Clear button the (now minimum-charges-only)
+ * info modal used to show on a balance-due row.
+ */
+function CreditCardDueSection({
+  card,
+  transactions,
+  onClearBalance,
+}: {
+  card: CreditCard
+  transactions: Transaction[]
+  onClearBalance: (date: string, amount: number) => void
+}) {
+  const rows = buildCreditCardDueOverviewRows(card, transactions)
+  const past = rows.filter((r) => r.isPast)
+  const mostRecent = past.length > 0 ? past[past.length - 1] : null
+  const upcoming = rows.filter((r) => !r.isPast).slice(0, mostRecent ? 3 : 4)
+
+  if (!mostRecent && upcoming.length === 0) return null
+
+  return (
+    <div className="mb-1">
+      {mostRecent && (
+        <>
+          <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent due</h4>
+          <div className="flex flex-col gap-2 mb-3">
+            <CreditCardDueRow row={mostRecent} onClearBalance={onClearBalance} />
+          </div>
+        </>
+      )}
+      {upcoming.length > 0 && (
+        <>
+          <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming due</h4>
+          <div className="flex flex-col gap-2 mb-3">
+            {upcoming.map((row) => (
+              <CreditCardDueRow key={row.date} row={row} onClearBalance={onClearBalance} />
+            ))}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function CreditCardDueRow({
+  row,
+  onClearBalance,
+}: {
+  row: { date: string; balanceDue: number; isPast: boolean }
+  onClearBalance: (date: string, amount: number) => void
+}) {
+  return (
+    <div className="rounded-xl p-3 flex items-center justify-between gap-2" style={{ background: 'var(--color-bg-elevated)' }}>
+      <div className="min-w-0">
+        <p className="text-sm text-[var(--color-ink)]">{row.date}</p>
+        <p className="text-xs text-[var(--color-ink-muted)]">£{formatCurrency(row.balanceDue)} balance due</p>
+      </div>
+      {!row.isPast && (
+        <button
+          onClick={() => onClearBalance(row.date, row.balanceDue)}
+          className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+          style={{ background: 'var(--color-coral)' }}
+        >
+          Clear
+        </button>
       )}
     </div>
   )
@@ -1399,25 +1454,20 @@ function CreditCardLedgerModal({
   card,
   transactions,
   onUpdateMinimumCharge,
-  onClearBalance,
   onClose,
 }: {
   card: CreditCard
   transactions: Transaction[]
   onUpdateMinimumCharge: (date: string, amount: number) => void
-  /** UAT 2026-09-08 (8-bug9.2-minimum-charges-stop, Adam's own spec, 2nd
-   * design pass) — logs an overpayment for the FULL balance due on that
-   * date (not just that date's minimum), dated on it. */
-  onClearBalance: (date: string, amount: number) => void
   onClose: () => void
 }) {
+  // 2026-09-09 session (Adam-specified) — this modal is now minimum
+  // charges ONLY. The balance-due-per-date row + Clear button that used
+  // to live here moved to the expanded credit card section on the
+  // Borrowing page (see CreditCardEditPanel's "Payment due" block below),
+  // styled like the Salary page's most-recent/upcoming list instead of a
+  // scrollable modal row.
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
-  // UAT 2026-09-08 — a genuinely SEPARATE row from the minimum charge,
-  // not a variant of it (Adam's own correction of the first attempt at
-  // this): "I see two rows per payment date, first being any due
-  // balance... second row is the minimum charge for the same date."
-  const balanceDueRows = buildCreditCardBalanceDueRows(card, transactions)
-  const balanceDueByDate = new Map(balanceDueRows.map((r) => [r.date, r.balanceDue]))
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
@@ -1448,25 +1498,8 @@ function CreditCardLedgerModal({
 
         <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {rows.map((row) => {
-            const balanceDue = balanceDueByDate.get(row.date)
             return (
               <div key={row.date} className="flex flex-col">
-                {balanceDue != null && (
-                  <div className="py-2 flex items-center justify-between gap-2 border-b" style={{ borderColor: 'var(--color-track)' }}>
-                    <div className="min-w-0">
-                      <span className="text-xs text-[var(--color-ink)]">{row.date} · Balance due</span>
-                      <p className="text-[10px] text-[var(--color-ink-faint)]">Paying this in full zeroes off future minimum charges</p>
-                    </div>
-                    <span className="text-xs font-mono text-[var(--color-ink)] shrink-0">£{formatCurrency(balanceDue)}</span>
-                    <button
-                      onClick={() => onClearBalance(row.date, balanceDue)}
-                      className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
-                      style={{ background: 'var(--color-coral)' }}
-                    >
-                      Clear
-                    </button>
-                  </div>
-                )}
                 {editingDate === row.date ? (
                   <div className="py-2 flex items-center gap-2">
                     <span className="text-xs text-[var(--color-ink-muted)] flex-1">{row.date} · Minimum charge</span>
@@ -1487,8 +1520,7 @@ function CreditCardLedgerModal({
                 ) : (
                   <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
                     <span className="text-xs text-[var(--color-ink)]">
-                      {row.date}
-                      {balanceDue != null && ' · Minimum charge'}
+                      {row.date} · Minimum charge
                       {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
                     </span>
                     <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
@@ -1845,9 +1877,9 @@ function OverpaymentForm({
 // the new values; loan overpayments don't need that step since a loan's
 // balance is always derived fresh from its schedule, never stored. ──
 
-type LoggedPayment = { id: string; date: string; amount: number; note?: string }
+export type LoggedPayment = { id: string; date: string; amount: number; note?: string }
 
-function LoggedPaymentList({
+export function LoggedPaymentList({
   payments,
   onUpdate,
   onRemove,
@@ -1895,9 +1927,6 @@ function LoggedPaymentList({
     </div>
   )
 }
-
-// Kept as an alias so the credit card call site below reads clearly.
-const LumpPaymentList = LoggedPaymentList
 
 function LoggedPaymentEditForm({
   payment,
