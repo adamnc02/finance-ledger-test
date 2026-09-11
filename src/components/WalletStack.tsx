@@ -63,12 +63,19 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
     )
   }
 
+  // The front card is the collapse target — it never moves, collapsed or
+  // expanded. Every other card's offset is `positionFromFront` gaps back
+  // from it; each gap is REVEAL px collapsed, and — this is the
+  // "compounding" the plan asked for — grows by EXPAND_EXTRA once
+  // expanded. Growing the gap under any card also pushes every card
+  // further back up by that same amount, so a card N-1 gaps from the
+  // front accumulates (N-1) * EXPAND_EXTRA of growth, not a flat
+  // EXPAND_EXTRA — this is what actually clears each card's own label as
+  // it fans out above the ones in front of it.
   function offsetFor(positionFromFront: number): number {
-    // positionFromFront: 0 = frontmost .. n-1 = backmost.
-    const i = n - positionFromFront // 1 = backmost .. n = frontmost
-    const collapsed = (n - i) * REVEAL
-    if (!expanded) return collapsed
-    return collapsed + (i - 1) * EXPAND_EXTRA
+    if (positionFromFront === 0) return 0
+    const collapsed = positionFromFront * REVEAL
+    return expanded ? collapsed + positionFromFront * EXPAND_EXTRA : collapsed
   }
 
   const maxOffset = offsetFor(n - 1) // backmost card's own offset
@@ -105,6 +112,18 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
             transform: `translateY(-${offset}px)`,
             transition: 'transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)',
             zIndex,
+            // BankCard's 'custom' variant gradient (credit cards, pots,
+            // savings pots) ends in a semi-transparent stop
+            // (`${customColor}cc`) — harmless side-by-side in the old
+            // carousel, but here two cards' boxes substantially overlap
+            // (a collapsed sliver is only REVEAL px offset from the one
+            // in front of it), so without an opaque backing the card
+            // behind bleeds through the front card's translucent edge.
+            // This backing is that opaque layer, matching the page
+            // background so it reads as "nothing behind it" rather than
+            // introducing a visible seam.
+            borderRadius: 24, // matches BankCard's own rounded-3xl, so the backing never peeks past its rounded corners
+            background: 'var(--color-bg)',
           }
 
           if (isFront) {
