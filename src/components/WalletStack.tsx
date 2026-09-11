@@ -63,22 +63,23 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
     )
   }
 
-  // The front card is the collapse target — it never moves, collapsed or
-  // expanded. Every other card's offset is `positionFromFront` gaps back
-  // from it; each gap is REVEAL px collapsed, and — this is the
-  // "compounding" the plan asked for — grows by EXPAND_EXTRA once
-  // expanded. Growing the gap under any card also pushes every card
-  // further back up by that same amount, so a card N-1 gaps from the
-  // front accumulates (N-1) * EXPAND_EXTRA of growth, not a flat
-  // EXPAND_EXTRA — this is what actually clears each card's own label as
-  // it fans out above the ones in front of it.
-  function offsetFor(positionFromFront: number): number {
-    if (positionFromFront === 0) return 0
-    const collapsed = positionFromFront * REVEAL
-    return expanded ? collapsed + positionFromFront * EXPAND_EXTRA : collapsed
+  // The BACKMOST card (idx 0) is the fixed anchor — it never moves,
+  // collapsed or expanded, positioned at the wrapper's own top. Every
+  // other card sits `idx` steps down from it and drifts further down to
+  // expand, back up to collapse — each step is REVEAL px collapsed, and
+  // — this is the "compounding" the plan asked for — EXPAND_EXTRA more
+  // per step once expanded, so a card 2 steps from the back drifts down
+  // by 2 * EXPAND_EXTRA of growth, not a flat EXPAND_EXTRA. This is what
+  // actually clears each card's own label as it fans out below the ones
+  // behind it, and — critically — it means no card's position is ever
+  // derived from the wrapper's own height, so nothing can snap when that
+  // height changes (the bug in the previous front-anchored version).
+  function offsetFor(idx: number): number {
+    if (idx === 0) return 0
+    return idx * (expanded ? REVEAL + EXPAND_EXTRA : REVEAL)
   }
 
-  const maxOffset = offsetFor(n - 1) // backmost card's own offset
+  const maxOffset = offsetFor(n - 1) // frontmost card's own offset, the largest
   const wrapperHeight = frontHeight + maxOffset
 
   return (
@@ -99,17 +100,16 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
         onClick={expanded ? undefined : () => setExpanded(true)}
       >
         {items.map((item, idx) => {
-          const positionFromFront = n - 1 - idx // 0 = frontmost
-          const isFront = positionFromFront === 0
-          const offset = offsetFor(positionFromFront)
-          const zIndex = 20 + (n - positionFromFront) // frontmost highest
+          const isFront = idx === n - 1
+          const offset = offsetFor(idx)
+          const zIndex = 20 + idx // frontmost highest
 
           const commonStyle: React.CSSProperties = {
             position: 'absolute',
             insetInlineStart: 0,
             insetInlineEnd: 0,
-            bottom: 0,
-            transform: `translateY(-${offset}px)`,
+            top: 0,
+            transform: `translateY(${offset}px)`,
             transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
             zIndex,
             // BankCard's 'custom' variant gradient (credit cards, pots,
