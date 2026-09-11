@@ -110,7 +110,7 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
             insetInlineEnd: 0,
             bottom: 0,
             transform: `translateY(-${offset}px)`,
-            transition: 'transform 0.32s cubic-bezier(0.22, 1, 0.36, 1)',
+            transition: 'transform 0.5s cubic-bezier(0.22, 1, 0.36, 1)',
             zIndex,
             // BankCard's 'custom' variant gradient (credit cards, pots,
             // savings pots) ends in a semi-transparent stop
