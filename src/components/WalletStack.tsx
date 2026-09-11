@@ -93,7 +93,7 @@ export function WalletStack({ items, onSelect, belowCards }: WalletStackProps) {
       )}
       <div
         className="relative px-0.5"
-        style={{ height: wrapperHeight }}
+        style={{ height: wrapperHeight, transition: 'height 0.5s cubic-bezier(0.22, 1, 0.36, 1)' }}
         role={expanded ? undefined : 'button'}
         aria-label={expanded ? undefined : 'Show all cards'}
         onClick={expanded ? undefined : () => setExpanded(true)}
