@@ -12,11 +12,12 @@ import { schedulePreviewWindow, scheduledDepositDates, depositOccurrencePreviews
 import { schedulePotPreviewWindow, scheduledPotDepositDates, potDepositOccurrencePreviews, setPausedPotDeposits, resolvePotDepositOccurrenceAmount, applyPotSingleDepositAmountChange } from '../lib/potLedger'
 import { FormButtonRow, CancelButton, SaveButton } from '../components/FormButtons'
 import { useSavedFlash, SavedFlashOverlay } from '../components/SavedFlash'
-import { visibleCategoriesFor } from '../lib/categories'
+import { visibleCategoriesFor, seededCategoryIdForIcon } from '../lib/categories'
 import {
   recentAndUpcomingOccurrences,
   applyTemplateAmountChange,
   applyTemplateSingleOccurrenceAmountChange,
+  applyTemplateSingleOccurrenceDateChange,
   resolveOccurrenceAmount,
   templateOccurrencePreviews,
   setPausedTemplateOccurrences,
@@ -32,6 +33,7 @@ import { RecurringChangeConfirmModal } from '../components/RecurringChangeConfir
 import { EffectiveDatedChangeFlow, type RecurringChangeField, type ChangeScope } from '../components/EffectiveDatedChangeFlow'
 import { addYears, addDays, addMonths } from 'date-fns'
 import type { PaymentMethod, RecurrenceFrequency, RecurringTemplate, SavingsPot, Pot, Transaction, TransferLocation, AppDataV2, Loan, CreditCard, LoanRecurringOverpayment, Category, PayCycleConfig } from '../types/ledger'
+import type { BillLocation } from '../types/models'
 import type { LoggedPayment } from './Loans'
 import {
   previewOverpaymentRecast,
@@ -461,6 +463,8 @@ export function Expenses() {
                         paymentMethod: entry.paymentMethod,
                         personId: entry.personId,
                         note: entry.note || undefined,
+                        location: entry.location,
+                        potId: entry.potId,
                       })
                 setJustCreatedTransactionId(id)
                 setAdding(false)
@@ -796,6 +800,22 @@ function EditEntryForm({
   const [categoryId, setCategoryId] = useState(transaction.categoryId)
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>(transaction.paymentMethod)
 
+  // 2026-09-13 (dev.md item 5) — editable only for the same ad-hoc
+  // expense/income types the field is offered at creation time for (see
+  // ExpenseForm's own comment); bonus/salary/card-spend/etc. keep their
+  // own existing location semantics untouched.
+  const canEditLocation = transaction.type === 'expense' || transaction.type === 'income'
+  const PERSONAL_LOCATION_OPTION: TransferLocationOption = { key: 'personal', label: 'Current Account', location: { type: 'personal' } }
+  const pickableLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId).filter(
+    (o) => o.location.type !== 'savings',
+  )
+  const nonPersonalLocationOptions = pickableLocationOptions.filter((o) => o.location.type !== 'personal')
+  const initialLocationOption =
+    pickableLocationOptions.find((o) => transferLocationKey(o.location) === transferLocationKey(transaction.location === 'pot' ? { type: 'pot', potId: transaction.potId } : { type: transaction.location as 'personal' | 'joint' })) ??
+    PERSONAL_LOCATION_OPTION
+  const [locationOption, setLocationOption] = useState<TransferLocationOption>(initialLocationOption)
+  const [pickingLocation, setPickingLocation] = useState(false)
+
   const amountNumber = Number(amount)
   const canSave = name.trim() && amountNumber > 0 && date && categoryId
   // credit_card_spend is always paid by card, by definition — don't offer
@@ -810,7 +830,8 @@ function EditEntryForm({
     amountNumber !== transaction.amount ||
     date !== transaction.date ||
     categoryId !== transaction.categoryId ||
-    (paymentMethodEditable && paymentMethod !== transaction.paymentMethod)
+    (paymentMethodEditable && paymentMethod !== transaction.paymentMethod) ||
+    (canEditLocation && locationOption.key !== initialLocationOption.key)
 
   return (
     <div className="p-3 pt-0 flex flex-col gap-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
@@ -840,6 +861,24 @@ function EditEntryForm({
           </div>
         </label>
       )}
+      {canEditLocation &&
+        nonPersonalLocationOptions.length > 0 &&
+        (pickingLocation ? (
+          <LocationStep
+            title="Location"
+            options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
+            onPick={(o) => {
+              setLocationOption(o)
+              setPickingLocation(false)
+            }}
+            onCancel={() => setPickingLocation(false)}
+          />
+        ) : (
+          <button onClick={() => setPickingLocation(true)} className="flex flex-col gap-1 text-left">
+            <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
+            <span className="text-sm text-[var(--color-ink)]">{locationOption.label}</span>
+          </button>
+        ))}
       <FormButtonRow
         onCancel={onCancel}
         onSave={() =>
@@ -849,6 +888,12 @@ function EditEntryForm({
             categoryId,
             paymentMethod: paymentMethodEditable ? paymentMethod : transaction.paymentMethod,
             note: name.trim(),
+            ...(canEditLocation
+              ? {
+                  location: (locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : 'personal') as BillLocation,
+                  potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
+                }
+              : {}),
           })
         }
         saveDisabled={!canSave || !dirty}
@@ -866,6 +911,9 @@ interface ExpenseFormEntry {
   creditCardId?: string
   personId: string
   note: string
+  /** 2026-09-13 (dev.md item 5) — Personal (omit), Joint, or a regular Pot — never a Savings Pot. See ExpenseForm's own Location block comment. */
+  location?: 'joint' | 'pot'
+  potId?: string
 }
 
 function ExpenseForm({
@@ -883,10 +931,30 @@ function ExpenseForm({
   const [name, setName] = useState('')
   const [amount, setAmount] = useState('')
   const [date, setDate] = useState(todayIso())
-  const [categoryId, setCategoryId] = useState(visibleCategoriesFor(data)[0]?.id ?? '')
+  const defaultCategoryId = seededCategoryIdForIcon('food')
+  const [categoryId, setCategoryId] = useState(
+    visibleCategoriesFor(data).some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (visibleCategoriesFor(data)[0]?.id ?? ''),
+  )
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
   const [chargeToCreditCard, setChargeToCreditCard] = useState(false)
   const [creditCardId, setCreditCardId] = useState<string>('')
+
+  // 2026-09-13 (dev.md item 5, Adam-specified) — "location" here reuses
+  // the exact same flat option list recurring transfers pick from
+  // (buildTransferLocationOptions), minus Savings Pots (excluded by
+  // design — this is about which ACCOUNT a transaction sits against, not
+  // a savings destination) and minus Personal itself from the picker's
+  // own list (Personal is the implicit default, not something to "pick
+  // into"). The field only renders at all once there's a genuine
+  // non-Personal choice to make — a Joint account exists, or this person
+  // has at least one Pot.
+  const PERSONAL_LOCATION_OPTION: TransferLocationOption = { key: 'personal', label: 'Current Account', location: { type: 'personal' } }
+  const pickableLocationOptions = buildTransferLocationOptions(data.savingsPots, data.pots, !!data.jointAccount, data.primaryPersonId).filter(
+    (o) => o.location.type !== 'savings',
+  )
+  const nonPersonalLocationOptions = pickableLocationOptions.filter((o) => o.location.type !== 'personal')
+  const [locationOption, setLocationOption] = useState<TransferLocationOption>(PERSONAL_LOCATION_OPTION)
+  const [pickingLocation, setPickingLocation] = useState(false)
 
   const isChargeableToCard = type === 'expense' && paymentMethod === 'card' && chargeToCreditCard && data.creditCards.length > 0
   const amountNumber = Number(amount)
@@ -986,6 +1054,25 @@ function ExpenseForm({
           entirely (Adam-specified: "I cannot log transactions on behalf
           of another person"). Income logged here is always yours —
           data.primaryPersonId, hardcoded below. */}
+
+      {nonPersonalLocationOptions.length > 0 &&
+        (pickingLocation ? (
+          <LocationStep
+            title="Location"
+            options={[PERSONAL_LOCATION_OPTION, ...nonPersonalLocationOptions]}
+            onPick={(o) => {
+              setLocationOption(o)
+              setPickingLocation(false)
+            }}
+            onCancel={() => setPickingLocation(false)}
+          />
+        ) : (
+          <button onClick={() => setPickingLocation(true)} className="flex flex-col gap-1 text-left">
+            <span className="text-xs text-[var(--color-ink-muted)]">Location</span>
+            <span className="text-sm text-[var(--color-ink)]">{locationOption.label}</span>
+          </button>
+        ))}
+
       <FormButtonRow
         onCancel={onCancel}
         onSave={() =>
@@ -998,6 +1085,8 @@ function ExpenseForm({
             creditCardId: creditCardId || undefined,
             personId: data.primaryPersonId,
             note: name.trim(),
+            location: locationOption.location.type === 'joint' || locationOption.location.type === 'pot' ? locationOption.location.type : undefined,
+            potId: locationOption.location.type === 'pot' ? locationOption.location.potId : undefined,
           })
         }
         saveDisabled={!canSave}
@@ -2705,6 +2794,7 @@ function TransferRecurringRow({
               }}
               onSave={(pausedDates) => onUpdate(setPausedTemplateOccurrences(template, [...windowOriginalDates], pausedDates))}
               onSaveAmount={(originalDate, newAmount) => onUpdate(applyTemplateSingleOccurrenceAmountChange(template, newAmount, originalDate))}
+              onSaveDate={(originalDate, newDate) => onUpdate(applyTemplateSingleOccurrenceDateChange(template, newDate, originalDate))}
             />
           </div>
         )}
@@ -2797,7 +2887,8 @@ function RecurringTransactionForm({
   const [frequency, setFrequency] = useState<RecurringFrequency>('monthly')
   const [intervalWeeks, setIntervalWeeks] = useState(2)
   const [anchorDate, setAnchorDate] = useState(todayIso())
-  const [categoryId, setCategoryId] = useState(categories[0]?.id ?? '')
+  const defaultCategoryId = seededCategoryIdForIcon('food')
+  const [categoryId, setCategoryId] = useState(categories.some((c) => c.id === defaultCategoryId) ? defaultCategoryId : (categories[0]?.id ?? ''))
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('card')
 
   const canSave = name.trim() && Number(amount) > 0 && anchorDate && categoryId
