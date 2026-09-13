@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet } from 'lucide-react'
+import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
+import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress } from '../lib/ledgerLoans'
 import { computeJointSummary } from '../lib/jointLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from '../lib/jointAccountLedger'
@@ -200,6 +201,12 @@ export function Home() {
   // with totals on, those same two pills nest inside each cycle section
   // instead, alongside the existing per-cycle closing balance.
   const [groupByDirection, setGroupByDirection] = useState(false)
+  // 2026-09-13 (average spend forecast, Adam-specified) — Personal and
+  // Joint cards only, off by default. Threaded exactly like
+  // groupByDirection; the per-card gating (which entry.kind actually
+  // offers it, and only once Cycle-end totals is on) lives in
+  // activeFilterLabels/FiltersSheet, not here.
+  const [averageSpendForecast, setAverageSpendForecast] = useState(false)
 
   const deck = useMemo(() => buildDeck(data), [data])
 
@@ -266,6 +273,8 @@ export function Home() {
           setShowCleared={setShowCleared}
           groupByDirection={groupByDirection}
           setGroupByDirection={setGroupByDirection}
+          averageSpendForecast={averageSpendForecast}
+          setAverageSpendForecast={setAverageSpendForecast}
         />
         <DeckDetail
           entry={activeEntry}
@@ -279,6 +288,7 @@ export function Home() {
           cycleTotals={cycleTotalsActive}
           showCleared={showCleared}
           groupByDirection={groupByDirection}
+          averageSpendForecast={averageSpendForecast}
         />
       </div>
     </div>
@@ -504,7 +514,7 @@ function SavingsPotCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // 2026-09-13 — see CycleGroupedList's identical effect for the full
   // reasoning: every cycle auto-expands while "Group by direction" is
   // on, so its nested Incoming/Outgoing subtotal pills are visible
   // without an extra manual tap per cycle.
@@ -605,7 +615,7 @@ function CardRow({
   value: number
   emphasized?: boolean
   light?: boolean
-  /** 2026-09-14 (Adam-specified) — Joint hero's per-person name rows read slightly smaller than every other CardRow label, now that "Current balance" leads the card as the more prominent figure. */
+  /** 2026-09-13 (Adam-specified) — Joint hero's per-person name rows read slightly smaller than every other CardRow label, now that "Current balance" leads the card as the more prominent figure. */
   small?: boolean
 }) {
   const negative = value < 0
@@ -877,7 +887,7 @@ function DeckHero({ entry, data, horizon }: { entry: DeckEntry; data: AppDataV2;
       const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
       const bounds = { start: cycles[0].start, end: cycles[cycles.length - 1].end }
       const summary = computeJointSummary(data, bounds.start, bounds.end)
-      // 2026-09-14 (Adam-specified) — a real "Current balance" row now
+      // 2026-09-13 (Adam-specified) — a real "Current balance" row now
       // leads the card, same figure JointDetail/JointBreakdownCard's own
       // clearedBalance already shows (computeJointAccountProjection),
       // rendered here only once the joint account actually exists (mirrors
@@ -1036,6 +1046,7 @@ function DeckDetail(props: {
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection: boolean
+  averageSpendForecast: boolean
 }) {
   const { entry, data } = props
   switch (entry.kind) {
@@ -1102,10 +1113,84 @@ function canShowCycleTotals(entry: DeckEntry, horizon: ProjectionHorizon, groupi
   )
 }
 
-// ── Deck controls — cycle toggle + Group by/Order by, living BETWEEN the
-// hero deck and the detail card (not inside either one). Cycle toggle on
-// the left; Group by/Order by stacked on the right, as inline dropdown
-// text buttons rather than segmented pills, per the redesign. ──
+/**
+ * The forecast row data for every FUTURE cycle (never the current one)
+ * that needs one — see PROMPT-average-spend-forecast-toggle-2026-09-13.md.
+ * Shared between PersonalDetail (`{ location: 'personal', ownerId }`) and
+ * JointDetail (`{ location: 'joint' }`); `personId` is always
+ * `data.primaryPersonId` for BOTH — the joint account has no independent
+ * "joint pay cycle" concept of its own, it borrows the primary person's.
+ * Keyed by each cycle's own start date (ISO) so `CycleGroupedList` can
+ * look a cycle's forecast up by its own `section.startIso`. Returns an
+ * empty map (not undefined) when the average itself is 0 — simplifies
+ * every caller to a single `.get(...)` with no extra null-check.
+ */
+function buildForecastByCycle(data: AppDataV2, scope: SpendScope, personId: string, cycles: { start: Date; end: Date }[]): Map<string, { forecastAmount: number; realSpend: number }> {
+  const map = new Map<string, { forecastAmount: number; realSpend: number }>()
+  const averagePerCycle = averageAdHocExpensePerCycle(data, scope, personId, new Date())
+  if (averagePerCycle <= 0) return map
+  // cycles[0] is always "Current cycle" (horizonCycles' own convention) — the forecast only ever fills in FUTURE cycles.
+  for (const cycle of cycles.slice(1)) {
+    const { forecastAmount, realSpend } = forecastSpendForCycle(data, scope, averagePerCycle, cycle)
+    if (forecastAmount > 0) map.set(toLocalIsoDate(cycle.start), { forecastAmount, realSpend })
+  }
+  return map
+}
+
+const DECK_CONTROLS_SHOW_GROUP_ORDER = (entry: DeckEntry) =>
+  entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
+
+/**
+ * 2026-09-13 (deck controls cleanup, Adam-specified) — a plain-English
+ * list of everything about the current view that differs from ITS OWN
+ * default, used for both the Filters button's active dot and the
+ * one-line caption underneath it. Deliberately compares each control
+ * against its own default rather than a blanket "is this switch on" —
+ * Cycle-end totals defaults to ON, so turning it OFF is just as much a
+ * non-default view as turning something else on (Adam's own question,
+ * settled live: "what about toggling cycle end off?"). Group by/Order by
+ * are only checked for card kinds that actually offer them — the
+ * grouping/order state is shared page-wide, so a stale 'category' left
+ * over from viewing a DIFFERENT card must never light this card's own
+ * dot (Show cleared/Cycle-end totals/Group by direction have no such
+ * cross-card leakage risk, since their own defaults are globally
+ * consistent regardless of which card is showing).
+ */
+function activeFilterLabels(
+  entry: DeckEntry,
+  grouping: Grouping,
+  order: Order,
+  showCleared: boolean,
+  cycleTotals: boolean,
+  groupByDirection: boolean,
+  averageSpendForecast: boolean,
+): string[] {
+  const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
+  const labels: string[] = []
+  if (showGroupOrder && grouping !== 'list') labels.push(`Group by ${grouping === 'category' ? 'category' : 'person'}`)
+  if (showGroupOrder && order !== 'date') labels.push('Order by amount')
+  if (showCleared) labels.push('Show cleared')
+  if (!cycleTotals) labels.push('Cycle-end totals off')
+  if (groupByDirection) labels.push('Group by direction')
+  // Personal/Joint only — the toggle doesn't exist for any other card
+  // kind, so a stale `true` from viewing Personal must never light
+  // Household/Pot/Credit Card/Savings Pot's own dot (unlike Cycle-end
+  // totals/Group by direction, which genuinely apply everywhere, this
+  // one doesn't).
+  if ((entry.kind === 'personal' || entry.kind === 'joint') && averageSpendForecast) labels.push('Average spend forecast')
+  return labels
+}
+
+// ── Deck controls — cycle toggle + a single "Filters" button, living
+// BETWEEN the hero deck and the detail card (not inside either one).
+// 2026-09-13 cleanup (Adam-specified — see
+// PROMPT-deck-controls-cleanup-2026-09-13.md): this used to be the cycle
+// toggle plus up to 2 inline dropdowns and 4 stacked toggle switches,
+// always visible — cluttered on a narrow phone screen. Now only the
+// cycle toggle stays inline; everything else lives behind one Filters
+// button (FiltersSheet, below), with an active-state dot + one-line
+// caption so the collapsed state doesn't hide WHAT changed, only the
+// controls for changing it. ──
 
 function DeckControls({
   entry,
@@ -1121,6 +1206,8 @@ function DeckControls({
   setShowCleared,
   groupByDirection,
   setGroupByDirection,
+  averageSpendForecast,
+  setAverageSpendForecast,
 }: {
   entry: DeckEntry
   horizon: ProjectionHorizon
@@ -1135,36 +1222,132 @@ function DeckControls({
   setShowCleared: (v: boolean) => void
   groupByDirection: boolean
   setGroupByDirection: (v: boolean) => void
+  averageSpendForecast: boolean
+  setAverageSpendForecast: (v: boolean) => void
 }) {
-  // Widened (Adam-specified, 2026-09-03): Group by/Order by/Cycle-totals/
-  // Show cleared now apply to Household and Joint too, not just Personal.
-  // Pots backlog item (2026-09 session) — a Pot DOES get the full
-  // toolkit, unlike SavingsPot: Adam's own spec for it, verbatim, is "the
-  // same style as the Personal swipe card... group by / sort by
-  // features, with the same default settings and layout as Personal" —
-  // genuinely different from a SavingsPot's much simpler deposit/interest
-  // history, which has no meaningful "category" to group by.
-  const showHorizon = true
-  const showGroupOrder = entry.kind === 'personal' || entry.kind === 'household' || entry.kind === 'joint' || entry.kind === 'pot'
-  // UAT 2026-09-08 (Summary page cycle-end totals, Adam-specified) — a
-  // credit card gets ONLY the Cycle-end totals toggle, not Group-by/
-  // Order-by (no meaningful category to group a single card's own
-  // activity by), so it renders in its own spot below rather than
-  // inside the showGroupOrder cluster. UAT 2026-09-09 (retest) — Show
-  // cleared IS offered for a credit card now, alongside it — every
-  // other list on this page hides cleared rows by default, and the
-  // credit card's own lists (flat and cycle-grouped) had no way to
-  // toggle that at all.
-  //
-  // Widened again (Adam-specified, 2026-09-12) to include 'savings_pot'
-  // — every card in the deck now offers Show cleared/Cycle-end totals in
-  // SOME form; a Savings Pot gets the same narrow cluster a credit card
-  // does (no Group-by/Order-by, still no meaningful category to group a
-  // single pot's own deposit/interest/withdrawal history by), just using
-  // the household pay-cycle dates instead of a credit card's own billing
-  // dates — see canShowCycleTotals' own comment.
-  const showSimpleToggles = entry.kind === 'credit_card' || entry.kind === 'savings_pot'
-  const showSimpleCycleTotals = showSimpleToggles && canShowCycleTotals(entry, horizon, grouping, order)
+  const [filtersOpen, setFiltersOpen] = useState(false)
+  const activeLabels = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast)
+  const isNonDefault = activeLabels.length > 0
+
+  function resetToDefault() {
+    if (DECK_CONTROLS_SHOW_GROUP_ORDER(entry)) {
+      setGrouping('list')
+      setOrder('date')
+    }
+    setShowCleared(false)
+    setCycleTotals(true)
+    setGroupByDirection(false)
+    setAverageSpendForecast(false)
+  }
+
+  return (
+    <div className="mb-5 px-1">
+      <div className="flex items-center justify-between">
+        <CycleToggle value={horizon} onChange={setHorizon} />
+        <div className="flex items-center gap-3">
+          {/* "Reset to default", added 2026-09-13 (Adam-specified) —
+              shown next to the Filters button itself (a second copy also
+              lives inside FiltersSheet), gated by the exact same
+              `isNonDefault` check the active dot uses, so it only ever
+              appears when there's actually something to reset. */}
+          {isNonDefault && (
+            <button onClick={resetToDefault} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
+              Reset
+            </button>
+          )}
+          <div className="relative">
+            <button
+              onClick={() => setFiltersOpen(true)}
+              aria-label="Filters"
+              className="w-10 h-10 rounded-full flex items-center justify-center"
+              style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}
+            >
+              <SlidersHorizontal size={17} style={{ color: 'var(--color-ink)' }} />
+            </button>
+            {/* Active-state dot — see activeFilterLabels' own comment for the "differs from ITS OWN default" rule. */}
+            {isNonDefault && (
+              <span
+                className="absolute rounded-full"
+                style={{ top: -2, right: -2, width: 10, height: 10, background: 'var(--color-coral)', border: '2px solid var(--color-bg)' }}
+              />
+            )}
+          </div>
+        </div>
+      </div>
+      {isNonDefault && (
+        <p className="text-[11px] mt-2" style={{ color: 'var(--color-ink-faint)' }}>
+          {activeLabels.join(' · ')}
+        </p>
+      )}
+      {filtersOpen && (
+        <FiltersSheet
+          entry={entry}
+          horizon={horizon}
+          grouping={grouping}
+          setGrouping={setGrouping}
+          order={order}
+          setOrder={setOrder}
+          cycleTotals={cycleTotals}
+          setCycleTotals={setCycleTotals}
+          showCleared={showCleared}
+          setShowCleared={setShowCleared}
+          groupByDirection={groupByDirection}
+          setGroupByDirection={setGroupByDirection}
+          averageSpendForecast={averageSpendForecast}
+          setAverageSpendForecast={setAverageSpendForecast}
+          onClose={() => setFiltersOpen(false)}
+        />
+      )}
+    </div>
+  )
+}
+
+/**
+ * 2026-09-13 (deck controls cleanup, Adam-specified) — everything that
+ * used to live in DeckControls' own always-visible dropdown/toggle stack
+ * now lives here instead, opened from the Filters button. Group by/Order
+ * by become segmented pill rows (every option visible at once, no
+ * tap-to-open dropdown); every toggle becomes a full-width row with room
+ * for a short helper caption on the less self-explanatory ones. Every
+ * pick still applies live the instant it's tapped — there is nothing to
+ * "cancel," so the X and a tap on the backdrop both just close the
+ * sheet (Adam-specified: "any selections made are instant, so no need
+ * for a cancel button").
+ */
+function FiltersSheet({
+  entry,
+  horizon,
+  grouping,
+  setGrouping,
+  order,
+  setOrder,
+  cycleTotals,
+  setCycleTotals,
+  showCleared,
+  setShowCleared,
+  groupByDirection,
+  setGroupByDirection,
+  averageSpendForecast,
+  setAverageSpendForecast,
+  onClose,
+}: {
+  entry: DeckEntry
+  horizon: ProjectionHorizon
+  grouping: Grouping
+  setGrouping: (v: Grouping) => void
+  order: Order
+  setOrder: (v: Order) => void
+  cycleTotals: boolean
+  setCycleTotals: (v: boolean) => void
+  showCleared: boolean
+  setShowCleared: (v: boolean) => void
+  groupByDirection: boolean
+  setGroupByDirection: (v: boolean) => void
+  averageSpendForecast: boolean
+  setAverageSpendForecast: (v: boolean) => void
+  onClose: () => void
+}) {
+  const showGroupOrder = DECK_CONTROLS_SHOW_GROUP_ORDER(entry)
   // Household is the only card with a genuine "group by person" —
   // Personal is already one person, and Joint deliberately shows no
   // individuals at all (Adam-specified, 2026-09-03).
@@ -1179,78 +1362,184 @@ function DeckControls({
           { value: 'list', label: 'List' },
           { value: 'category', label: 'Category' },
         ]
-  if (!showHorizon && !showGroupOrder) return null
+  // Deliberately narrow: cycle-end totals only mean anything in the one
+  // view that has multiple cycles to bound (three_cycles) AND a
+  // continuous date-ordered running balance to take a subtotal FROM
+  // (list + date) — see canShowCycleTotals' own comment. Rather than
+  // showing a toggle that quietly does nothing, it's absent outside that
+  // combination — and canShowCycleTotals gates the ACTUAL render too, so
+  // a value left over from a previous selection can't leak into a view
+  // it doesn't apply to.
+  const showCycleTotalsToggle = canShowCycleTotals(entry, horizon, grouping, order)
+  // Independent of Cycle-end totals, but still only offered for 'list'
+  // grouping + 'date' order on a Group-by/Order-by card: 'category'/
+  // 'person' already split the ledger a different way
+  // (CategoryGroupedList/PersonGroupedList don't accept a
+  // groupByDirection prop), and AmountOrderedList doesn't either.
+  // Credit Card/Savings Pot have no Group-by/Order-by of their own to
+  // conflict with, so it's always offered there.
+  const showGroupByDirectionToggle = !showGroupOrder || (grouping === 'list' && order === 'date')
+  // 2026-09-13 (average spend forecast) — Personal/Joint only, AND only
+  // once Cycle-end totals is genuinely ON (not just capable of being
+  // on) — the forecast row only ever renders inside CycleGroupedList, so
+  // this toggle has nowhere to take effect otherwise (Adam-specified:
+  // "only relevant... when Cycle-end totals is already on").
+  const showAverageSpendForecastToggle = (entry.kind === 'personal' || entry.kind === 'joint') && showCycleTotalsToggle && cycleTotals
+  const isNonDefault = activeFilterLabels(entry, grouping, order, showCleared, cycleTotals, groupByDirection, averageSpendForecast).length > 0
+
+  function resetToDefault() {
+    if (showGroupOrder) {
+      setGrouping('list')
+      setOrder('date')
+    }
+    setShowCleared(false)
+    setCycleTotals(true)
+    setGroupByDirection(false)
+    setAverageSpendForecast(false)
+  }
 
   return (
-    <div className="flex items-start justify-between mb-5 px-1">
-      <div>{showHorizon && <CycleToggle value={horizon} onChange={setHorizon} />}</div>
-      {showSimpleToggles && (
-        <div className="flex flex-col items-end gap-1.5">
-          <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {showSimpleCycleTotals && <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />}
-          {/* 2026-09-13 — independent of Cycle-end totals (see
-              groupByDirection's own comment in Home's top-level state):
-              always offered here, same as Show cleared, since a credit
-              card/savings pot has no Group-by/Order-by of its own for
-              this to conflict with. */}
-          <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />
+    <>
+      <div role="button" aria-label="Close filters" onClick={onClose} style={{ position: 'fixed', inset: 0, background: 'rgba(5,7,13,0.72)', zIndex: 40 }} />
+      <div
+        style={{
+          position: 'fixed',
+          left: 0,
+          right: 0,
+          bottom: 0,
+          zIndex: 41,
+          background: 'var(--color-bg-elevated)',
+          borderTop: '1px solid var(--color-track)',
+          borderRadius: '24px 24px 0 0',
+          padding: '20px 20px calc(20px + env(safe-area-inset-bottom, 0px))',
+          boxShadow: '0 -12px 32px rgba(0,0,0,0.4)',
+          maxHeight: '80vh',
+          overflowY: 'auto',
+        }}
+      >
+        <div className="flex flex-col items-center gap-3.5">
+          <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
+          <div className="w-full flex items-center justify-between">
+            <span className="font-display text-base font-semibold text-[var(--color-ink)]">Ledger view</span>
+            <button onClick={onClose} className="text-[var(--color-ink-muted)]">
+              <X size={18} />
+            </button>
+          </div>
         </div>
-      )}
-      {showGroupOrder && (
-        <div className="flex flex-col items-end gap-1.5">
-          <InlineDropdown
-            label="Group by"
-            value={grouping}
-            options={groupingOptions}
-            onChange={setGrouping}
-          />
-          <InlineDropdown
-            label="Order by"
-            value={order}
-            options={[
-              { value: 'date', label: 'Date' },
-              { value: 'amount', label: 'Amount' },
-            ]}
-            onChange={setOrder}
-            disabled={grouping === 'category'}
-          />
+
+        <div className="flex flex-col gap-4 mt-4">
+          {showGroupOrder && (
+            <>
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-muted)]">Group by</span>
+                <div className="flex gap-1.5">
+                  {groupingOptions.map((opt) => (
+                    <button
+                      key={opt.value}
+                      onClick={() => setGrouping(opt.value)}
+                      className="flex-1 py-2 rounded-full text-sm font-medium"
+                      style={{ background: grouping === opt.value ? 'var(--color-coral)' : 'var(--color-surface)', color: grouping === opt.value ? '#fff' : 'var(--color-ink-muted)' }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex flex-col gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--color-ink-muted)]">Order by</span>
+                <div className="flex gap-1.5">
+                  {(
+                    [
+                      { value: 'date', label: 'Date' },
+                      { value: 'amount', label: 'Amount' },
+                    ] as { value: Order; label: string }[]
+                  ).map((opt) => (
+                    <button
+                      key={opt.value}
+                      disabled={grouping === 'category'}
+                      onClick={() => setOrder(opt.value)}
+                      className="flex-1 py-2 rounded-full text-sm font-medium disabled:opacity-40"
+                      style={{ background: order === opt.value ? 'var(--color-coral)' : 'var(--color-surface)', color: order === opt.value ? '#fff' : 'var(--color-ink-muted)' }}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div style={{ height: 1, background: 'var(--color-surface-raised)' }} />
+            </>
+          )}
+
           {/* Unlike cycle-end totals below, this one applies to every
               grouping/order combination — list, category, and amount all
               have SOME notion of "hide the rows that already cleared"
               (and, for category, a total to match), so it's never gated
               on the current view the way cycle-end totals is. */}
-          <ToggleSwitch label="Show cleared" checked={showCleared} onChange={setShowCleared} />
-          {/* Deliberately narrow: cycle-end totals only mean anything in
-              the one view that has multiple cycles to bound (three_cycles)
-              AND a continuous date-ordered running balance to take a
-              subtotal FROM (list + date). Grouping by category destroys
-              the date ordering the fold depends on; ordering by amount
-              does the same; and the current-cycle view has exactly one
-              cycle, so a per-cycle subtotal would just restate the
-              projected balance. Rather than showing a toggle that quietly
-              does nothing, it's absent outside that combination — and
-              canShowCycleTotals gates the RENDER too, so a value left
-              over from a previous selection can't leak into a view it
-              doesn't apply to. */}
-          {canShowCycleTotals(entry, horizon, grouping, order) && (
-            <ToggleSwitch label="Cycle-end totals" checked={cycleTotals} onChange={setCycleTotals} />
+          <ToggleSwitch full label="Show cleared" checked={showCleared} onChange={setShowCleared} />
+          {showCycleTotalsToggle && (
+            <ToggleSwitch full label="Cycle-end totals" help="Subtotal each pay cycle" checked={cycleTotals} onChange={setCycleTotals} />
           )}
-          {/* 2026-09-13 — independent of Cycle-end totals, but still only
-              offered for 'list' grouping + 'date' order: 'category'/
-              'person' already split the ledger a different way
-              (CategoryGroupedList/PersonGroupedList don't accept a
-              groupByDirection prop), and AmountOrderedList doesn't either
-              — rather than show a toggle that would quietly do nothing
-              there (the same instinct canShowCycleTotals already
-              follows), it's simply absent outside list+date. */}
-          {grouping === 'list' && order === 'date' && <ToggleSwitch label="Group by direction" checked={groupByDirection} onChange={setGroupByDirection} />}
+          {showGroupByDirectionToggle && (
+            <ToggleSwitch full label="Group by direction" help="Split into incoming / outgoing" checked={groupByDirection} onChange={setGroupByDirection} />
+          )}
+          {showAverageSpendForecastToggle && (
+            <ToggleSwitch
+              full
+              label="Average spend forecast"
+              help="Fill empty future cycles with a spend estimate"
+              checked={averageSpendForecast}
+              onChange={setAverageSpendForecast}
+            />
+          )}
+
+          {isNonDefault && (
+            <button onClick={resetToDefault} className="text-sm font-medium text-center py-1" style={{ color: 'var(--color-coral)' }}>
+              Reset to default
+            </button>
+          )}
+          <button onClick={onClose} className="w-full py-3 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            Done
+          </button>
         </div>
-      )}
-    </div>
+      </div>
+    </>
   )
 }
 
-function ToggleSwitch({ label, checked, onChange }: { label: string; checked: boolean; onChange: (v: boolean) => void }) {
+function ToggleSwitch({
+  label,
+  checked,
+  onChange,
+  help,
+  full,
+}: {
+  label: string
+  checked: boolean
+  onChange: (v: boolean) => void
+  /** 2026-09-13 (deck controls cleanup) — a short helper caption under the label, only used in the `full` (FiltersSheet row) layout. */
+  help?: string
+  /** 2026-09-13 (deck controls cleanup) — the full-width "settings row" layout FiltersSheet uses (label + optional help on the left, a slightly larger switch on the right), instead of the compact inline label+switch pair used elsewhere on this page. */
+  full?: boolean
+}) {
+  if (full) {
+    return (
+      <button type="button" role="switch" aria-checked={checked} onClick={() => onChange(!checked)} className="w-full flex items-center justify-between gap-3 text-left">
+        <span className="flex flex-col gap-0.5">
+          <span className="text-sm font-medium text-[var(--color-ink)]">{label}</span>
+          {help && <span className="text-[11px] text-[var(--color-ink-muted)]">{help}</span>}
+        </span>
+        <span
+          className="relative inline-block rounded-full transition-colors shrink-0"
+          style={{ width: 38, height: 22, background: checked ? 'var(--color-coral)' : 'var(--color-track)' }}
+        >
+          <span
+            className="absolute rounded-full bg-white transition-transform"
+            style={{ width: 18, height: 18, top: 2, left: 2, transform: checked ? 'translateX(16px)' : 'translateX(0)', boxShadow: '0 1px 2px rgba(0,0,0,0.2)' }}
+          />
+        </span>
+      </button>
+    )
+  }
   return (
     <button
       type="button"
@@ -1287,57 +1576,6 @@ function CycleToggle({ value, onChange }: { value: ProjectionHorizon; onChange: 
           {HORIZON_LABELS[h]}
         </button>
       ))}
-    </div>
-  )
-}
-
-function InlineDropdown<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-  disabled,
-}: {
-  label: string
-  value: T
-  options: { value: T; label: string }[]
-  onChange: (v: T) => void
-  disabled?: boolean
-}) {
-  const [open, setOpen] = useState(false)
-  const currentLabel = options.find((o) => o.value === value)?.label ?? value
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => !disabled && setOpen((o) => !o)}
-        disabled={disabled}
-        className="flex items-center gap-1 text-xs font-medium"
-        style={{ color: disabled ? 'var(--color-ink-faint)' : 'var(--color-ink-muted)', cursor: disabled ? 'default' : 'pointer' }}
-      >
-        {label}: {currentLabel}
-        <ChevronDown size={12} />
-      </button>
-      {open && !disabled && (
-        <>
-          <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
-          <div className="absolute right-0 top-full mt-1 rounded-xl overflow-hidden z-20 shadow-lg" style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}>
-            {options.map((opt) => (
-              <button
-                key={opt.value}
-                onClick={() => {
-                  onChange(opt.value)
-                  setOpen(false)
-                }}
-                className="block w-full text-left px-3 py-2 text-xs whitespace-nowrap"
-                style={{ color: value === opt.value ? 'var(--color-coral)' : 'var(--color-ink)' }}
-              >
-                {opt.label}
-              </button>
-            ))}
-          </div>
-        </>
-      )}
     </div>
   )
 }
@@ -1399,7 +1637,7 @@ function TransactionRow({
  * 2026-09-13 (dev.md item 2, Adam-specified) — "Group by direction":
  * splits whatever set of rows it's given into two independently
  * expandable/collapsible pills, Incoming and Outgoing. Both pills
- * default to COLLAPSED (2026-09-14 follow-up, Adam-specified: turning
+ * default to COLLAPSED (2026-09-13 follow-up, Adam-specified: turning
  * the toggle on should surface the incoming/outgoing SUBTOTALS, not
  * dump every individual transaction on screen) — each pill's header
  * always shows its own running total regardless of expand state, so the
@@ -1515,6 +1753,46 @@ function formatCycleDate(iso: string): string {
  * shorter than it is. Its subtotal is simply the balance carried in from
  * the previous cycle (or folded through whatever cleared automatically).
  */
+
+/** 2026-09-13 (average spend forecast) — the row-shaped item DirectionGroupedRows folds a cycle's real transactions AND its (at most one) synthetic forecast row into, so the forecast row can sit inside the "Outgoing" pill alongside real expenses rather than needing its own separate treatment. */
+type CycleRowItem = { kind: 'real'; t: Transaction; running: number } | { kind: 'forecast'; forecastAmount: number; realSpend: number; cycleEndIso: string }
+
+/**
+ * 2026-09-13 (average spend forecast, Adam-specified) — "a completely
+ * different design to normal ledger rows", not a `TransactionRow` (this
+ * isn't a real `Transaction` and shouldn't be forced into that shape).
+ * The icon badge is deliberately the INVERSE of `CategoryIcon`'s own
+ * treatment — a solid-filled coral circle with the glyph drawn in the
+ * page's own background colour, so it reads as a cutout through the
+ * fill rather than a coloured-icon-on-neutral-circle. Dashed outline +
+ * italic muted label reinforce "this is an estimate, not a real entry."
+ * The "Reduced from £X" caption only appears once the reduction
+ * actually did something (`realSpend > 0`) — otherwise it's just noise
+ * ("Reduced from £0" says nothing true).
+ */
+function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: number; realSpend: number }) {
+  const averagePerCycle = round2(forecastAmount + realSpend)
+  return (
+    <div className="flex items-center gap-3 py-2 px-2 my-1 rounded-xl" style={{ border: '1px dashed var(--color-ink-faint)' }}>
+      <span className="inline-flex items-center justify-center shrink-0 rounded-full" style={{ width: 30, height: 30, background: 'var(--color-coral)' }}>
+        <TrendingUp size={14} strokeWidth={2} style={{ color: 'var(--color-bg)' }} />
+      </span>
+      <div className="flex-1 min-w-0">
+        <p className="text-sm italic" style={{ color: 'var(--color-ink-muted)' }}>
+          Average spend forecast
+        </p>
+        {realSpend > 0 && (
+          <p className="text-[11px]" style={{ color: 'var(--color-ink-faint)' }}>
+            Reduced from £{formatCurrency(averagePerCycle)} · estimate
+          </p>
+        )}
+      </div>
+      <span className="text-sm font-mono font-semibold shrink-0" style={{ color: 'var(--color-ink-muted)' }}>
+        -£{formatCurrency(forecastAmount)}
+      </span>
+    </div>
+  )
+}
 function CycleGroupedList({
   transactions,
   data,
@@ -1523,6 +1801,7 @@ function CycleGroupedList({
   showCleared,
   amountSign,
   groupByDirection,
+  forecastByCycle,
 }: {
   transactions: Transaction[]
   data: AppDataV2
@@ -1531,6 +1810,8 @@ function CycleGroupedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /** 2026-09-13 (average spend forecast) — one entry per FUTURE cycle that needs a synthetic forecast row, keyed by that cycle's own start date (ISO). Personal/Joint only; every other caller omits this entirely. See buildForecastByCycle's own comment. */
+  forecastByCycle?: Map<string, { forecastAmount: number; realSpend: number }>
 }) {
   const sign = amountSign ?? signedAmount
   // Collapse state tracks what's explicitly been TOGGLED away from its
@@ -1539,7 +1820,7 @@ function CycleGroupedList({
   // cycle — including for a cycle that first appears mid-session as the
   // horizon rolls forward.
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 (follow-up, Adam-specified) — turning "Group by direction"
+  // 2026-09-13 (follow-up, Adam-specified) — turning "Group by direction"
   // on should surface the incoming/outgoing SUBTOTALS straight away,
   // which live inside each cycle's own expanded body — so every cycle
   // auto-expands the moment the toggle switches on (and any per-cycle
@@ -1587,13 +1868,21 @@ function CycleGroupedList({
     const rows = withRunning.filter(({ t }) => (i === 0 || t.date >= startIso) && t.date <= endIso)
     // Balance carried OUT of this cycle — the last row's running figure,
     // or, for an empty cycle, whatever came in from the one before.
-    const closing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    const realClosing = rows.length > 0 ? rows[rows.length - 1].running : carried
+    // 2026-09-13 (average spend forecast) — a forecast row for this
+    // cycle (if any) reduces its closing balance by its own forecast
+    // amount, same as a real expense would — and that ADJUSTED figure
+    // is what carries forward into every later cycle's own opening
+    // point, so the projected balance genuinely reflects it rather than
+    // being a purely cosmetic row.
+    const forecast = forecastByCycle?.get(startIso)
+    const closing = forecast ? round2(realClosing - forecast.forecastAmount) : realClosing
     carried = closing
     // Respects the "Show cleared" toggle — computed here, AFTER `closing`
     // above already folded every row (cleared included), so this can
     // never change the balance figures, only which rows render.
     const visibleRows = rows.filter(({ t }) => showCleared || t.status !== 'cleared')
-    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, visibleRows, closing }
+    return { key: startIso, isCurrent: i === 0, startIso, endIso, rows, visibleRows, closing, forecast }
   })
 
   return (
@@ -1628,22 +1917,27 @@ function CycleGroupedList({
             {expanded && (
               <div className="px-3 pb-1">
                 {groupByDirection ? (
-                  <DirectionGroupedRows
-                    items={section.visibleRows}
-                    isIncoming={({ t }) => (amountSign ? amountSign(t) : signedAmount(t)) > 0}
-                    amountOf={({ t }) => Math.abs(amountSign ? amountSign(t) : signedAmount(t))}
-                    dateOf={({ t }) => t.date}
-                    keyOf={({ t }) => t.id}
-                    renderRow={({ t }) => <TransactionRow t={t} data={data} amountSign={amountSign} />}
+                  <DirectionGroupedRows<CycleRowItem>
+                    items={[
+                      ...section.visibleRows.map((r): CycleRowItem => ({ kind: 'real', t: r.t, running: r.running })),
+                      ...(section.forecast ? [{ kind: 'forecast' as const, forecastAmount: section.forecast.forecastAmount, realSpend: section.forecast.realSpend, cycleEndIso: section.endIso }] : []),
+                    ]}
+                    isIncoming={(item) => item.kind === 'real' && (amountSign ? amountSign(item.t) : signedAmount(item.t)) > 0}
+                    amountOf={(item) => (item.kind === 'real' ? Math.abs(amountSign ? amountSign(item.t) : signedAmount(item.t)) : item.forecastAmount)}
+                    dateOf={(item) => (item.kind === 'real' ? item.t.date : item.cycleEndIso)}
+                    keyOf={(item) => (item.kind === 'real' ? item.t.id : 'forecast')}
+                    renderRow={(item) => (item.kind === 'real' ? <TransactionRow t={item.t} data={data} amountSign={amountSign} /> : <ProjectedSpendRow forecastAmount={item.forecastAmount} realSpend={item.realSpend} />)}
                   />
                 ) : (
                   <div className="flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
                     {section.visibleRows.map(({ t, running }) => (
                       <TransactionRow key={t.id} t={t} data={data} runningBalance={running} amountSign={amountSign} />
                     ))}
-                    {section.visibleRows.length === 0 && (
+                    {section.visibleRows.length === 0 && !section.forecast && (
                       <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-3">Nothing in this cycle.</p>
                     )}
+                    {/* Always the LAST line in the cycle, regardless of date — Adam's own explicit requirement (see PROMPT-average-spend-forecast-toggle-2026-09-13.md). */}
+                    {section.forecast && <ProjectedSpendRow forecastAmount={section.forecast.forecastAmount} realSpend={section.forecast.realSpend} />}
                   </div>
                 )}
                 <div
@@ -1859,6 +2153,7 @@ function PersonalDetail({
   cycleTotals,
   showCleared,
   groupByDirection,
+  averageSpendForecast,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -1867,6 +2162,7 @@ function PersonalDetail({
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection?: boolean
+  averageSpendForecast?: boolean
 }) {
   const payCycle = data.payCycles.find((pc) => pc.personId === data.primaryPersonId)
   if (!payCycle) return null
@@ -1878,6 +2174,7 @@ function PersonalDetail({
   // final section's closing balance is the projected balance by
   // construction rather than by coincidence.
   const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+  const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'personal', ownerId: data.primaryPersonId }, data.primaryPersonId, cycles) : undefined
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -1891,7 +2188,15 @@ function PersonalDetail({
       ) : order === 'amount' ? (
         <AmountOrderedList transactions={ledgerTxns} data={data} showCleared={showCleared} />
       ) : cycleTotals ? (
-        <CycleGroupedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} cycles={cycles} showCleared={showCleared} groupByDirection={groupByDirection} />
+        <CycleGroupedList
+          transactions={ledgerTxns}
+          data={data}
+          openingRunningBalance={projection.openingBalance}
+          cycles={cycles}
+          showCleared={showCleared}
+          groupByDirection={groupByDirection}
+          forecastByCycle={forecastByCycle}
+        />
       ) : (
         <DateOrderedList transactions={ledgerTxns} data={data} openingRunningBalance={projection.openingBalance} showCleared={showCleared} groupByDirection={groupByDirection} />
       )}
@@ -2072,6 +2377,7 @@ function JointDetail({
   cycleTotals,
   showCleared,
   groupByDirection,
+  averageSpendForecast,
 }: {
   data: AppDataV2
   horizon: ProjectionHorizon
@@ -2080,6 +2386,7 @@ function JointDetail({
   cycleTotals: boolean
   showCleared: boolean
   groupByDirection?: boolean
+  averageSpendForecast?: boolean
 }) {
   // BUGFIX (Adam-reported, 2026-09 session) — this used to also compute
   // an old flat per-item `summary` list (computeJointSummary) and render
@@ -2092,6 +2399,10 @@ function JointDetail({
   // line or "Real ledger" heading in between).
   const jointProjection = computeJointAccountProjection(data, horizon)
   const cycles = horizonCycles(data, data.primaryPersonId, horizon, new Date())
+  // Cycle boundaries borrow the primary person's own pay cycle — there's
+  // no independent "joint pay cycle" concept in this app, same anchor
+  // computeJointAccountProjection's own cycles use.
+  const forecastByCycle = averageSpendForecast ? buildForecastByCycle(data, { location: 'joint' }, data.primaryPersonId, cycles) : undefined
 
   return (
     <div className="rounded-3xl p-5" style={{ background: 'var(--color-surface)' }}>
@@ -2117,6 +2428,7 @@ function JointDetail({
               showCleared={showCleared}
               amountSign={jointAccountSignedAmount}
               groupByDirection={groupByDirection}
+              forecastByCycle={forecastByCycle}
             />
           ) : (
             <DateOrderedList
@@ -2424,7 +2736,7 @@ function CreditCardCycleGroupedList({
   groupByDirection?: boolean
 }) {
   const [toggled, setToggled] = useState<Set<string>>(() => new Set())
-  // 2026-09-14 — see CycleGroupedList's identical effect for the full
+  // 2026-09-13 — see CycleGroupedList's identical effect for the full
   // reasoning: every cycle auto-expands while "Group by direction" is
   // on, so its nested Payments/Spend subtotal pills are visible without
   // an extra manual tap per cycle.
