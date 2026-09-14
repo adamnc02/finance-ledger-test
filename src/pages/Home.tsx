@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso } from '../lib/date'
-import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp } from 'lucide-react'
+import { ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, horizonRangeEnd, THREE_CYCLES_AHEAD, type ProjectionHorizon } from '../lib/projection'
 import { averageAdHocExpensePerCycle, forecastSpendForCycle, type SpendScope } from '../lib/averageSpendForecast'
@@ -23,7 +23,7 @@ import { BankCard } from '../components/BankCard'
 import { ProgressRing } from '../components/ProgressRing'
 import { CategoryIcon } from '../components/CategoryIcon'
 import { SAVINGS_CATEGORY_ID, CREDIT_CARD_CATEGORY_ID } from '../types/ledger'
-import { seededCategoryIdForIcon } from '../lib/categories'
+import { seededCategoryIdForIcon, DEFAULT_POT_CATEGORY_ICON, DEFAULT_POT_CATEGORY_ICON_COLOR } from '../lib/categories'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 
 // ── Deck construction — doc addendum on Summary card visibility ────────
@@ -133,6 +133,14 @@ const JOINT_ACCOUNT_GROUP_CATEGORY_ID = seededCategoryIdForIcon('joint')
  * SAVINGS_CATEGORY_ID directly (no separate real category to preserve),
  * so grouping by `categoryId` already does the right thing for them.
  */
+/** Synthetic, collision-proof group keys for a Pot/SavingsPot's own deposit/withdrawal/interest activity — never a real Category.id, so a pot named the same as a real category can never merge with it. */
+function potGroupCategoryId(potId: string): string {
+  return `pot:${potId}`
+}
+function savingsPotGroupCategoryId(savingsPotId: string): string {
+  return `savingspot:${savingsPotId}`
+}
+
 function groupingCategoryId(t: Transaction): string {
   if (t.type === 'loan_payment') return LOANS_GROUP_CATEGORY_ID
   if (t.type === 'credit_card_payment' || t.type === 'credit_card_spend') return CREDIT_CARD_CATEGORY_ID
@@ -140,6 +148,17 @@ function groupingCategoryId(t: Transaction): string {
   // ad-hoc expense, etc. — folds into the same Credit Card bucket even
   // though it isn't tied to a specific CreditCard entity at all.
   if (t.paymentMethod === 'card') return CREDIT_CARD_CATEGORY_ID
+  // 2026-09-14 — a Pot/SavingsPot's own deposit/withdrawal/interest
+  // transaction groups under THAT pot's own name, never the shared
+  // "Savings" category. Deliberately scoped to just these types — a
+  // pot-FUNDED bill_payment/loan_payment also carries `potId` (see
+  // TransactionType's own comment on pot_withdrawal) but is handled by
+  // the loan_payment check above / falls through to its own real
+  // categoryId below, exactly as before this change.
+  if (t.potId && (t.type === 'pot_deposit' || t.type === 'pot_withdrawal' || t.type === 'transfer')) return potGroupCategoryId(t.potId)
+  if (t.savingsPotId && (t.type === 'savings_deposit' || t.type === 'savings_withdrawal' || t.type === 'savings_interest' || t.type === 'transfer')) {
+    return savingsPotGroupCategoryId(t.savingsPotId)
+  }
   return t.categoryId
 }
 
@@ -1248,12 +1267,15 @@ function DeckControls({
         <div className="flex items-center gap-3">
           {/* "Reset to default", added 2026-09-13 (Adam-specified) —
               shown next to the Filters button itself (a second copy also
-              lives inside FiltersSheet), gated by the exact same
-              `isNonDefault` check the active dot uses, so it only ever
-              appears when there's actually something to reset. */}
+              lives inside FiltersSheet's header, next to its own close
+              icon), gated by the exact same `isNonDefault` check the
+              active count uses, so it only ever appears when there's
+              actually something to reset. 2026-09-14: swapped from a
+              text label to a RotateCcw icon, matching the Filters
+              button's own icon-only treatment. */}
           {isNonDefault && (
-            <button onClick={resetToDefault} className="text-xs font-medium" style={{ color: 'var(--color-coral)' }}>
-              Reset
+            <button onClick={resetToDefault} aria-label="Reset to default" style={{ color: 'var(--color-coral)' }}>
+              <RotateCcw size={17} />
             </button>
           )}
           <div className="relative">
@@ -1445,9 +1467,19 @@ function FiltersSheet({
           <div style={{ width: 36, height: 4, borderRadius: 999, background: 'var(--color-track)' }} />
           <div className="w-full flex items-center justify-between">
             <span className="font-display text-base font-semibold text-[var(--color-ink)]">Ledger view</span>
-            <button onClick={onClose} className="text-[var(--color-ink-muted)]">
-              <X size={18} />
-            </button>
+            <div className="flex items-center gap-3">
+              {/* 2026-09-14 — relocated here from the bottom of the sheet's
+                  control list, as an icon (RotateCcw) rather than a text
+                  label, sitting immediately left of the close icon. */}
+              {isNonDefault && (
+                <button onClick={resetToDefault} aria-label="Reset to default" style={{ color: 'var(--color-coral)' }}>
+                  <RotateCcw size={18} />
+                </button>
+              )}
+              <button onClick={onClose} className="text-[var(--color-ink-muted)]" aria-label="Close">
+                <X size={18} />
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1527,11 +1559,6 @@ function FiltersSheet({
             />
           )}
 
-          {isNonDefault && (
-            <button onClick={resetToDefault} className="text-sm font-medium text-center py-1" style={{ color: 'var(--color-coral)' }}>
-              Reset to default
-            </button>
-          )}
           <button onClick={onClose} className="w-full py-3 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
             Done
           </button>
@@ -1840,6 +1867,69 @@ function ProjectedSpendRow({ forecastAmount, realSpend }: { forecastAmount: numb
     </div>
   )
 }
+
+/**
+ * 2026-09-14 (Joint's "Group by Person," Adam-specified redesign) —
+ * nested inside CycleGroupedList's own per-cycle body exactly like
+ * DirectionGroupedRows is for "Group by direction" (see that component's
+ * own comment) — this is what actually flips Joint's person split from
+ * person-outer/cycle-inner (the old JointPersonGroupedList, now removed)
+ * to cycle-outer/person-inner, matching the direction view's own shape:
+ * a cycle expands to reveal each person's own pill, and a person's pill
+ * expands to reveal their individual transactions.
+ *
+ * `groups` is scoped to just ONE cycle's already-visible rows (built via
+ * `buildJointPersonGroups(data, section.visibleRows...)` at the call
+ * site) — unlike DirectionGroupedRows' fixed Incoming/Outgoing pair,
+ * the person list varies (2+ people, plus the unattributed "Spend"
+ * bucket) and an empty bucket for THIS cycle specifically is just noise,
+ * so empty groups are dropped entirely rather than shown with a "Nothing
+ * here" placeholder each.
+ */
+function JointPersonPills({ groups, data }: { groups: JointPersonGroup[]; data: AppDataV2 }) {
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
+  const toggle = (id: string) =>
+    setCollapsed((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+
+  const nonEmpty = groups.filter((g) => g.transactions.length > 0)
+
+  return (
+    <div className="flex flex-col gap-1.5">
+      {nonEmpty.map((group) => {
+        const expanded = !collapsed.has(group.id)
+        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
+        const ordered = group.transactions.slice().sort(compareByDateSalaryFirst)
+        return (
+          <div key={group.id} className="rounded-xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
+            <button onClick={() => toggle(group.id)} className="w-full flex items-center justify-between gap-2 px-3 py-2 text-left">
+              <span className="flex items-center gap-1.5 min-w-0">
+                {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
+                <span className="text-xs font-semibold text-[var(--color-ink)] truncate">{group.name}</span>
+              </span>
+              <span className="text-xs font-mono font-semibold tabular-nums shrink-0" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-ink-muted)' }}>
+                {total >= 0 ? '+' : '-'}£{formatCurrency(Math.abs(total))}
+              </span>
+            </button>
+            {expanded && (
+              <div className="px-3 pb-2 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
+                {ordered.map((t) => (
+                  <TransactionRow key={t.id} t={t} data={data} amountSign={jointAccountSignedAmount} />
+                ))}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {nonEmpty.length === 0 && <p className="text-[11px] text-[var(--color-ink-muted)] text-center py-2">Nothing in this cycle.</p>}
+    </div>
+  )
+}
+
 function CycleGroupedList({
   transactions,
   data,
@@ -1848,6 +1938,7 @@ function CycleGroupedList({
   showCleared,
   amountSign,
   groupByDirection,
+  groupByPerson,
   forecastByCycle,
 }: {
   transactions: Transaction[]
@@ -1857,6 +1948,8 @@ function CycleGroupedList({
   showCleared: boolean
   amountSign?: (t: Transaction) => number
   groupByDirection?: boolean
+  /** 2026-09-14 (Joint's "Group by Person," cycle-outer/person-inner redesign) — mutually exclusive with groupByDirection at the FiltersSheet level (Joint's own "Group by" pills only ever select one of List/Category/Person, and Direction is its own independent toggle only offered while grouping is List+Date). When on, each expanded cycle's body renders JointPersonPills instead of a flat/direction-split row list — see that component's own comment. Joint-only; every other caller omits this entirely. */
+  groupByPerson?: boolean
   /** 2026-09-13 (average spend forecast) — one entry per FUTURE cycle that needs a synthetic forecast row, keyed by that cycle's own start date (ISO). Personal/Joint only; every other caller omits this entirely. See buildForecastByCycle's own comment. */
   forecastByCycle?: Map<string, { forecastAmount: number; realSpend: number }>
 }) {
@@ -1875,11 +1968,13 @@ function CycleGroupedList({
   // clean, fully-expanded state rather than a confusing mix). The
   // DirectionGroupedRows pills nested inside default back to COLLAPSED
   // themselves (their own header still always shows the subtotal), so
-  // this doesn't dump every individual transaction on screen.
+  // this doesn't dump every individual transaction on screen. 2026-09-14:
+  // same reasoning extended to groupByPerson — the two are mutually
+  // exclusive (see groupByPerson's own comment) but share this effect.
   useEffect(() => {
     setToggled(new Set())
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupByDirection])
+  }, [groupByDirection, groupByPerson])
   const toggle = (key: string) =>
     setToggled((prev) => {
       const next = new Set(prev)
@@ -1936,10 +2031,11 @@ function CycleGroupedList({
     <div className="flex flex-col gap-2">
       {sections.map((section) => {
         // Every cycle collapsed by default — except while "Group by
-        // direction" is on, when every cycle auto-expands instead (see
-        // the useEffect above), so its nested Incoming/Outgoing subtotal
-        // pills are visible without an extra manual tap per cycle.
-        const expanded = groupByDirection ? !toggled.has(section.key) : toggled.has(section.key)
+        // direction" (or, 2026-09-14, "Group by person") is on, when
+        // every cycle auto-expands instead (see the useEffect above), so
+        // its nested subtotal pills are visible without an extra manual
+        // tap per cycle.
+        const expanded = groupByDirection || groupByPerson ? !toggled.has(section.key) : toggled.has(section.key)
         return (
           <div key={section.key} className="rounded-2xl overflow-hidden" style={{ background: 'var(--color-bg)' }}>
             <button onClick={() => toggle(section.key)} className="w-full flex items-center justify-between gap-2 px-3 py-2.5 text-left">
@@ -1963,7 +2059,9 @@ function CycleGroupedList({
 
             {expanded && (
               <div className="px-3 pb-1">
-                {groupByDirection ? (
+                {groupByPerson ? (
+                  <JointPersonPills groups={buildJointPersonGroups(data, section.visibleRows.map(({ t }) => t))} data={data} />
+                ) : groupByDirection ? (
                   <DirectionGroupedRows<CycleRowItem>
                     items={[
                       ...section.visibleRows.map((r): CycleRowItem => ({ kind: 'real', t: r.t, running: r.running })),
@@ -2152,20 +2250,32 @@ function CategoryGroupedList({
   return (
     <div className="flex flex-col gap-3">
       {sortedGroups.map(({ groupKey, visibleItems, total }) => {
-        const category = data.categories.find((c) => c.id === groupKey)
+        const potMatch = groupKey.startsWith('pot:') ? data.pots.find((p) => p.id === groupKey.slice(4)) : undefined
+        const savingsPotMatch = groupKey.startsWith('savingspot:') ? data.savingsPots.find((p) => p.id === groupKey.slice(11)) : undefined
+        const potOrSavingsPot = potMatch ?? savingsPotMatch
+        const category = potOrSavingsPot ? undefined : data.categories.find((c) => c.id === groupKey)
         // The Loans/Credit Card buckets fall back to their own name even
         // if the underlying category record has been renamed away from
         // it, or (for the Borrowing bucket, which is an ordinary deletable
         // seeded category rather than a protected built-in) deleted
         // outright — the bucket itself is still meaningful either way.
+        // A Pot/SavingsPot bucket falls back to "Uncategorised" only if
+        // the pot itself has since been deleted (its own transactions
+        // still exist in the window) — same reasoning, a different case.
         const fallbackName = groupKey === LOANS_GROUP_CATEGORY_ID ? 'Loans' : groupKey === CREDIT_CARD_CATEGORY_ID ? 'Credit Card' : groupKey === JOINT_ACCOUNT_GROUP_CATEGORY_ID ? 'Joint Account' : 'Uncategorised'
+        // A Pot/SavingsPot's own chosen icon (CategoryIconPickerModal),
+        // falling back to the shared generic pot icon if none was ever
+        // picked — see potOrSavingsPot's own comment on categoryIcon.
+        const potIconCategory = potOrSavingsPot
+          ? { icon: potOrSavingsPot.categoryIcon ?? DEFAULT_POT_CATEGORY_ICON, iconColor: potOrSavingsPot.categoryIconColor ?? DEFAULT_POT_CATEGORY_ICON_COLOR }
+          : undefined
         const isCollapsed = collapsed.has(groupKey)
         return (
           <div key={groupKey}>
             <button onClick={() => toggleGroup(groupKey)} className="w-full flex items-center gap-2 mb-1 text-left">
-              <CategoryIcon category={category} size={13} />
+              <CategoryIcon category={potIconCategory ?? category} size={13} />
               <span className="text-xs font-semibold text-[var(--color-ink)] flex-1">
-                {category?.name ?? fallbackName}
+                {potOrSavingsPot?.name ?? category?.name ?? fallbackName}
                 {isCollapsed && <span className="font-normal text-[var(--color-ink-faint)]"> · {visibleItems.length}</span>}
               </span>
               <span className="text-xs font-mono" style={{ color: total >= 0 ? 'var(--color-positive)' : 'var(--color-negative)' }}>
@@ -2463,13 +2573,20 @@ function JointDetail({
             £{formatCurrency(jointProjection.clearedBalance)} now · £{formatCurrency(jointProjection.projectedBalance)} projected · {HORIZON_LABELS[horizon].toLowerCase()}
           </p>
           {grouping === 'person' ? (
-            <JointPersonGroupedList
-              groups={buildJointPersonGroups(data, jointProjection.transactions)}
+            // 2026-09-14 (Adam-specified redesign) — cycle-outer,
+            // person-inner, same shape as "Group by direction": always
+            // routes through CycleGroupedList regardless of `order`/
+            // `cycleTotals`, exactly like `grouping === 'category'`
+            // below already ignores those two — Person grouping is now
+            // its own fixed view, not a further order/totals choice.
+            <CycleGroupedList
+              transactions={jointProjection.transactions}
               data={data}
+              openingRunningBalance={jointProjection.openingBalance}
               cycles={cycles}
-              order={order}
-              cycleTotals={cycleTotals}
               showCleared={showCleared}
+              amountSign={jointAccountSignedAmount}
+              groupByPerson
             />
           ) : grouping === 'category' ? (
             <CategoryGroupedList transactions={jointProjection.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
@@ -2649,77 +2766,6 @@ function PersonGroupedList({
       {personProjections.length === 0 && (
         <p className="text-sm text-[var(--color-ink-muted)] text-center py-6">Nobody has a pay cycle set up yet.</p>
       )}
-    </div>
-  )
-}
-
-/**
- * 2026-09-13 (Joint's "Group by Person", Adam-specified) — same
- * collapsible-section-per-bucket shape as `PersonGroupedList`
- * (Household's own "group by person"), but structurally different
- * underneath: Household's sections are genuinely separate personal
- * ledgers, each with its own real opening balance; Joint's sections
- * (from `buildJointPersonGroups`) are SHARES/slices of the one real
- * joint ledger, so each section's own `openingRunningBalance` is
- * deliberately 0 here — there's no real "this person's own opening
- * balance" to anchor to, only a notional running total of their
- * share/spend within the visible window. The section's own "Balance at
- * [date]" footer (inherited from CycleGroupedList/DateOrderedList,
- * unchanged) reads as "total this person's share/spend has come to,"
- * not a real balance — a reasonable reading given the label, but worth
- * a quick sanity check with Adam once it's visible.
- */
-function JointPersonGroupedList({
-  groups,
-  data,
-  cycles,
-  order,
-  cycleTotals,
-  showCleared,
-}: {
-  groups: JointPersonGroup[]
-  data: AppDataV2
-  cycles: { start: Date; end: Date }[]
-  order: Order
-  cycleTotals: boolean
-  showCleared: boolean
-}) {
-  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set())
-  const toggle = (id: string) =>
-    setCollapsed((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
-
-  return (
-    <div className="flex flex-col gap-4">
-      {groups.map((group) => {
-        const isCollapsed = collapsed.has(group.id)
-        const total = round2(group.transactions.reduce((sum, t) => sum + jointAccountSignedAmount(t), 0))
-        return (
-          <div key={group.id}>
-            <button onClick={() => toggle(group.id)} className="w-full flex items-center justify-between gap-2 mb-2 text-left">
-              <span className="flex items-center gap-1.5">
-                {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
-                <span className="text-sm font-semibold text-[var(--color-ink)]">{group.name}</span>
-              </span>
-              <span className="text-xs font-mono font-semibold tabular-nums" style={{ color: 'var(--color-ink-muted)' }}>
-                £{formatCurrency(total)}
-              </span>
-            </button>
-            {!isCollapsed &&
-              (order === 'amount' ? (
-                <AmountOrderedList transactions={group.transactions} data={data} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ) : cycleTotals ? (
-                <CycleGroupedList transactions={group.transactions} data={data} openingRunningBalance={0} cycles={cycles} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ) : (
-                <DateOrderedList transactions={group.transactions} data={data} openingRunningBalance={0} showCleared={showCleared} amountSign={jointAccountSignedAmount} />
-              ))}
-          </div>
-        )
-      })}
     </div>
   )
 }
