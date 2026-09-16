@@ -1200,6 +1200,30 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   return rows.sort((a, b) => a.date.localeCompare(b.date))
 }
 
+/**
+ * PROMPT-01 Part C (2026-09-16, Adam-specified) — does this card's minimum
+ * payment, by its own definition, always clear the whole balance?
+ *
+ * True only for a percent-of-balance minimum at 100% or more: whatever is
+ * owed on a due date, the minimum charge for that date IS all of it, so the
+ * balance always goes to zero on its own and there is nothing left for a
+ * user to clear manually. Adam, 2026-09-15: the row is untappable and reads
+ * "Set to Clear" — offering a Clear button there would be a no-op, and
+ * offering a manual override would invite her to set a figure the engine
+ * immediately supersedes.
+ *
+ * Deliberately NOT "the minimum happens to cover the balance this month"
+ * (Adam's explicit choice, 2026-09-16). A FIXED £200 minimum against a
+ * £150 balance also clears it, but that is a transient fact about one
+ * cycle, not a property of the card — its Clear button and Balance due
+ * rows must keep behaving exactly as they do today, which is what his
+ * mum's Natwest depends on. This predicate is a statement about the card's
+ * CONFIGURATION, which is why it takes no balance and no date.
+ */
+export function creditCardMinimumClearsFullBalance(card: CreditCard): boolean {
+  return card.minimumPayment.type === 'percent_of_balance' && card.minimumPayment.percent >= 100
+}
+
 export interface CreditCardBalanceDueRow {
   date: string
   /** The full balance owed as of this date — not just that date's own

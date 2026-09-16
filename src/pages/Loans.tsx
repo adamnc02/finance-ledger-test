@@ -19,7 +19,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -1310,6 +1310,10 @@ function CreditCardDueSection({
   onClearBalance: (date: string, amount: number) => void
 }) {
   const rows = buildCreditCardDueOverviewRows(card, transactions)
+  // PROMPT-01 Part C — a 100%-minimum card clears itself, so it gets a
+  // read-only indication instead of a Clear button (see
+  // creditCardMinimumClearsFullBalance).
+  const autoClears = creditCardMinimumClearsFullBalance(card)
   const past = rows.filter((r) => r.isPast)
   const mostRecent = past.length > 0 ? past[past.length - 1] : null
   const upcoming = rows.filter((r) => !r.isPast).slice(0, mostRecent ? 3 : 4)
@@ -1328,7 +1332,7 @@ function CreditCardDueSection({
         <>
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Most recent due</h4>
           <div className="flex flex-col gap-2 mb-3">
-            <CreditCardDueRow row={mostRecent} onRequestClear={setConfirming} />
+            <CreditCardDueRow row={mostRecent} autoClears={autoClears} onRequestClear={setConfirming} />
           </div>
         </>
       )}
@@ -1337,7 +1341,7 @@ function CreditCardDueSection({
           <h4 className="font-body text-sm font-semibold text-[var(--color-ink)] mb-2">Upcoming due</h4>
           <div className="flex flex-col gap-2 mb-3">
             {upcoming.map((row) => (
-              <CreditCardDueRow key={row.date} row={row} onRequestClear={setConfirming} />
+              <CreditCardDueRow key={row.date} row={row} autoClears={autoClears} onRequestClear={setConfirming} />
             ))}
           </div>
         </>
@@ -1361,9 +1365,18 @@ function CreditCardDueSection({
 
 function CreditCardDueRow({
   row,
+  autoClears,
   onRequestClear,
 }: {
   row: { date: string; balanceDue: number; isPast: boolean }
+  /** PROMPT-01 Part C — this card's minimum is 100% of the balance, so the
+   * charge on this date clears it in full on its own. Adam, 2026-09-15:
+   * "Row is untappable, wording is 'Set to Clear'." Rendered as static
+   * text, NOT a disabled button: a disabled button still reads as a
+   * control that is unavailable, when the truth is that nothing needs
+   * doing. A fixed minimum that merely happens to cover this month's
+   * balance is deliberately NOT included — see the predicate's comment. */
+  autoClears: boolean
   onRequestClear: (row: { date: string; balanceDue: number }) => void
 }) {
   return (
@@ -1372,15 +1385,20 @@ function CreditCardDueRow({
         <p className="text-sm text-[var(--color-ink)]">{row.date}</p>
         <p className="text-xs text-[var(--color-ink-muted)]">£{formatCurrency(row.balanceDue)} balance due</p>
       </div>
-      {!row.isPast && (
-        <button
-          onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
-          className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
-          style={{ background: 'var(--color-coral)' }}
-        >
-          Clear
-        </button>
-      )}
+      {!row.isPast &&
+        (autoClears ? (
+          <span className="text-[10px] font-semibold px-2 py-1 rounded-lg shrink-0" style={{ background: 'var(--color-track)', color: 'var(--color-ink-muted)' }}>
+            Set to Clear
+          </span>
+        ) : (
+          <button
+            onClick={() => onRequestClear({ date: row.date, balanceDue: row.balanceDue })}
+            className="text-[10px] font-semibold px-2 py-1 rounded-lg text-white shrink-0"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Clear
+          </button>
+        ))}
     </div>
   )
 }
@@ -1504,6 +1522,7 @@ function CreditCardLedgerModal({
   // styled like the Salary page's most-recent/upcoming list instead of a
   // scrollable modal row.
   const rows = buildCreditCardMinimumChargeRows(card, transactions)
+  const autoClears = creditCardMinimumClearsFullBalance(card)
   const [editingDate, setEditingDate] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
 
@@ -1530,10 +1549,29 @@ function CreditCardLedgerModal({
             <X size={20} />
           </button>
         </div>
-        <p className="text-xs text-[var(--color-ink-muted)] mb-3">Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page.</p>
+        {/* PROMPT-01 Part C — a 100%-minimum card has no adjustable rows
+            (an override would be immediately superseded by the 100% rule),
+            so it must not invite a tap that does nothing. */}
+        <p className="text-xs text-[var(--color-ink-muted)] mb-3">
+          {autoClears
+            ? "Clears automatically — your minimum payment is 100% of the balance. Spend and other card activity are on the card's own page."
+            : "Tap a minimum charge to adjust it — past or future. Spend and other card activity are on the card's own page."}
+        </p>
 
         <div className="overflow-y-auto flex-1 -mx-5 px-5 flex flex-col divide-y" style={{ borderColor: 'var(--color-track)' }}>
           {rows.map((row) => {
+            // PROMPT-01 Part C — the row's content is identical either way;
+            // only whether it is a tap target differs.
+            const rowBody = (
+              <>
+                <span className="text-xs text-[var(--color-ink)]">
+                  {row.date} · Minimum charge
+                  {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
+                  {autoClears && row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Set to Clear</span>}
+                </span>
+                <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
+              </>
+            )
             return (
               <div key={row.date} className="flex flex-col">
                 {editingDate === row.date ? (
@@ -1554,13 +1592,16 @@ function CreditCardLedgerModal({
                     </button>
                   </div>
                 ) : (
-                  <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
-                    <span className="text-xs text-[var(--color-ink)]">
-                      {row.date} · Minimum charge
-                      {row.status === 'pending' && <span className="text-[var(--color-ink-faint)]"> · Upcoming</span>}
-                    </span>
-                    <span className="text-xs font-mono text-[var(--color-ink)]">£{formatCurrency(row.amount)}</span>
-                  </button>
+                  // Part C — untappable by construction for a 100% card: a
+                  // plain div, so there is no tap target and no override
+                  // entry point on the row at all.
+                  autoClears ? (
+                    <div className="py-2 flex items-center justify-between text-left">{rowBody}</div>
+                  ) : (
+                    <button onClick={() => startEditing(row)} className="py-2 flex items-center justify-between text-left">
+                      {rowBody}
+                    </button>
+                  )
                 )}
               </div>
             )
