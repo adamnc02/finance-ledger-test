@@ -19,7 +19,7 @@ import {
   type CalibrationResult,
   type LoanLedgerRowType,
 } from '../lib/ledgerLoans'
-import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance } from '../lib/creditCards'
+import { nextMinimumChargeAmount, pickNextSharedCardColor, buildCreditCardMinimumChargeRows, buildCreditCardDueOverviewRows, cardBalanceAsOf, withLiveBalance, creditCardMinimumClearsFullBalance, defaultStatementWindowForPaymentDay } from '../lib/creditCards'
 import { CREDIT_CARD_CATEGORY_ID, type CreditCard, type CreditCardMinimumPayment, type Loan, type Pot, type StatementCalibrationLine, type Transaction } from '../types/ledger'
 import type { BillLocation } from '../types/models'
 import { EditField } from '../components/EditField'
@@ -445,6 +445,15 @@ export function Loans() {
       </CollapsibleSection>
     </div>
   )
+}
+
+/** The full ordinal for a day, e.g. 14 -> "14th". `ordinalSuffix` below
+ * returns only the SUFFIX ("th"), which reads correctly when the number is
+ * already being printed next to it ({day}{ordinalSuffix(day)}) but renders
+ * as a bare "th" on its own — a mistake the statement-window caption was
+ * already making before PROMPT-01 (2026-09-16). */
+function ordinalDay(day: number): string {
+  return `${day}${ordinalSuffix(day)}`
 }
 
 function ordinalSuffix(day: number): string {
@@ -1234,14 +1243,53 @@ function CreditCardEditPanel({
         />
       </div>
 
+      {/* PROMPT-01 A1 (2026-09-16, Adam-specified: "Prompt the user, but
+          default to paymentDayOfMonth") — a card with no statement window
+          has spend counting toward its VERY NEXT payment date, with no lag:
+          buy something on the 10th and it is due on the 14th. Most real
+          cards do not work that way, and neither of Adam's mum's cards has
+          a window because both predate the feature.
+
+          OFFERED, NEVER APPLIED SILENTLY. Setting a window on an existing
+          card retroactively moves still-pending spend between cycles, so it
+          has to be the user's own deliberate action — hence a button she
+          presses, pre-filled with the default, and not a migration. Already
+          cleared rows never move (APP-KNOWLEDGE.md §1.1), which is what the
+          note below tells her.
+
+          This is a convenience, not a correctness fix: since the Part A
+          root fix, a card with no window reconciles perfectly well without
+          one. */}
+      {draft.statementEndDay == null && draft.statementStartDay == null && (
+        <div className="rounded-xl p-3 -mt-1" style={{ background: 'var(--color-bg-elevated)' }}>
+          <p className="text-xs text-[var(--color-ink-muted)] mb-2">
+            No statement window set, so spend counts toward your very next payment date — something bought on the{' '}
+            {ordinalDay(Math.max(1, Number(draft.paymentDayOfMonth) - 4))} is due on the {ordinalDay(Number(draft.paymentDayOfMonth))}. Most cards give you a
+            statement period instead.
+          </p>
+          <button
+            type="button"
+            onClick={() => update(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)))}
+            className="text-[11px] font-semibold px-2.5 py-1.5 rounded-lg text-white"
+            style={{ background: 'var(--color-coral)' }}
+          >
+            Use the {ordinalDay(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)).statementStartDay)}–
+            {ordinalDay(defaultStatementWindowForPaymentDay(Number(draft.paymentDayOfMonth)).statementEndDay)}
+          </button>
+          <p className="text-[11px] text-[var(--color-ink-faint)] mt-2">
+            This moves upcoming spend into the cycle its statement belongs to. Payments you have already made stay exactly where they are.
+          </p>
+        </div>
+      )}
+
       {/* item e — a spend after this window's close doesn't count toward
           the minimum due for the window that already closed; it rolls
           into the NEXT one instead. Only shown once statementEndDay is
           actually set, since the feature is otherwise entirely inert. */}
       {draft.statementEndDay != null && (
         <p className="text-xs text-[var(--color-ink-faint)] -mt-1">
-          Statement window{draft.statementStartDay != null ? ` ${ordinalSuffix(draft.statementStartDay)}–` : ' closing '}
-          {ordinalSuffix(draft.statementEndDay)} — spend after the {ordinalSuffix(draft.statementEndDay)} counts toward the
+          Statement window{draft.statementStartDay != null ? ` ${ordinalDay(draft.statementStartDay)}–` : ' closing '}
+          {ordinalDay(draft.statementEndDay)} — spend after the {ordinalDay(draft.statementEndDay)} counts toward the
           following window's minimum payment, not this one's, even though it still shows in the balance above straight away.
         </p>
       )}

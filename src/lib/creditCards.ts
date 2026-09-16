@@ -1201,6 +1201,35 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
 }
 
 /**
+ * PROMPT-01 A1 (2026-09-16, Adam-specified) — the statement window to OFFER
+ * a card that has none. Adam: "Prompt the user, but default to
+ * paymentDayOfMonth."
+ *
+ * The window closes ON the payment day and the next one opens the day
+ * after, so a card paying on the 14th is offered "opens 15th, closes 14th":
+ * a full month of spend, ending on the day it is paid for. Wrapped at 31.
+ *
+ * WHY THIS IS NOW A FREE CHOICE. An earlier analysis proposed
+ * `paymentDayOfMonth + 1` because a window closing on or before the payment
+ * day left a residual balance stranded. That was measuring the Part A
+ * double-count, not statement mechanics: the cleared cycle was being
+ * re-simulated, and only a window closing after the payment date pushed the
+ * spend clear of the damage. With the root cause fixed, all 28 possible
+ * closing days reconcile correctly (swept against the real backup,
+ * 2026-09-16), so the default is free to be the one that is simplest to
+ * explain rather than the one that dodged a bug.
+ *
+ * OFFERED, NEVER APPLIED SILENTLY. Adding a window to an existing card
+ * retroactively moves still-PENDING spend between cycles — for Adam's mum
+ * that is the desired outcome, but it must be her own explicit action.
+ * Already-cleared rows never move (APP-KNOWLEDGE.md §1.1).
+ */
+export function defaultStatementWindowForPaymentDay(paymentDayOfMonth: number): { statementStartDay: number; statementEndDay: number } {
+  const endDay = Math.max(1, Math.min(31, Math.round(paymentDayOfMonth)))
+  return { statementStartDay: endDay === 31 ? 1 : endDay + 1, statementEndDay: endDay }
+}
+
+/**
  * PROMPT-01 Part C (2026-09-16, Adam-specified) — does this card's minimum
  * payment, by its own definition, always clear the whole balance?
  *
