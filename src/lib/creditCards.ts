@@ -1094,7 +1094,74 @@ export function buildCreditCardMinimumChargeRows(card: CreditCard, transactions:
   // editable) — a fresh card with none shows nothing before today at
   // all, rather than a year of rows that never happened.
   const earliestStoredMs = stored.length > 0 ? Math.min(...stored.map((t) => parseLocalDate(t.date).getTime())) : asOfDate.getTime()
-  const rangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
+  const naiveRangeStart = new Date(Math.min(earliestStoredMs, asOfDate.getTime()))
+  // BUGFIX (2026-09-16, PROMPT-01 Part A — mechanism 6, Adam-reported: his
+  // mum's Santander showed a past payment row and nothing else, stranding
+  // the £91.24 she genuinely still owed with no future due row to see or
+  // clear it; her Natwest lost exactly one £200 instalment the same way).
+  //
+  // ROOT CAUSE. `generateMinimumPaymentTransactions` opens its simulation
+  // from `cardBalanceAsOf(card, transactions, rangeStart)`, whose own
+  // filter is `t.date <= asOfIso` — INCLUSIVE. So a real payment dated
+  // exactly ON rangeStart is already deducted in the opening figure. The
+  // generator's cycle loop then starts at the 1st of rangeStart's month
+  // and emits a charge for every payment date passing
+  // `paymentDate >= rangeStart` (line ~709) — INCLUSIVE too — so the cycle
+  // whose due date IS rangeStart gets charged a second time for the very
+  // payment already folded into its opening balance.
+  //
+  // WHY `storedDates` DOES NOT ALREADY PROTECT THIS (the subtle part — an
+  // earlier analysis assumed it did, and a fix built on that assumption
+  // would double-correct). The `.filter((t) => !storedDates.has(t.date))`
+  // below discards the duplicate ROW, so nothing visibly wrong appears at
+  // that date. But it runs AFTER the generator has returned — by which
+  // point the duplicate deduction has already been applied to the
+  // simulation's internal running balance, which every LATER cycle is
+  // computed from. storedDates filters the display row, never the
+  // deduction. On a 100%-minimum card `workingBalance` is clamped
+  // (`Math.max(0, …)`), so the whole residual is swallowed and no further
+  // row is ever generated; on a fixed-minimum card it silently loses
+  // exactly one instalment. Same bug, two presentations.
+  //
+  // WHY A STATEMENT WINDOW MASKED IT. With a window, `statementBalance`
+  // opens from the last close instead and is deliberately NOT clamped, so
+  // the doubled payment sits as a legitimate negative (an overpayment
+  // credit) and nets cleanly back to zero when the delayed spend's own
+  // window closes a cycle later. Verified: window 19->18 opens the 14 Sept
+  // cycle at -£100 and recovers £50 correctly at 14 Oct. That cell was
+  // therefore never "protected" by different logic — it just cancels out,
+  // which is why only no-window cards (both of his mum's) showed it.
+  //
+  // THE FIX. Start the simulation the day AFTER a payment that is already
+  // inside the opening balance, restoring this function's own documented
+  // contract: "everything BEFORE rangeStart is inside the starting figure,
+  // everything from rangeStart onward is simulated forward exactly once."
+  // Chosen over "skip any cycle in storedDates" (the generator has no
+  // access to that set, and skipping a whole cycle would also skip its
+  // interest posting) and over "exclude payments dated on rangeStart from
+  // the opening balance" (which breaks the same contract from the other
+  // side, and double-counts whenever that cycle is NOT re-simulated).
+  //
+  // This also makes this function agree with `buildCreditCardCycleSections`,
+  // which was already correct for these cards purely because its
+  // `cycles[0].windowStart` happens to fall the day after the payment —
+  // the two paths now derive the same kind of rangeStart rather than
+  // disagreeing about the same card on the same data.
+  //
+  // Guarded on a real stored payment existing at that exact date, NOT on
+  // "rangeStart is a payment day": a fresh card with no stored history
+  // passes rangeStart = asOfDate, and if that happens to be its payment
+  // day its genuine charge must still be generated.
+  //
+  // Compared as ISO strings via toIso, never Date maths or toISOString —
+  // in BST a local-midnight Date serialises to the PREVIOUS day, which is
+  // exactly the class of seasonal bug documented in APP-KNOWLEDGE.md §2
+  // (and is why this defect hid behind an accidental one-hour offset
+  // until fc7a498/9d41891b; it would have surfaced unaided at the
+  // 25 October GMT changeover).
+  const rangeStart = storedDates.has(toIso(naiveRangeStart))
+    ? new Date(naiveRangeStart.getFullYear(), naiveRangeStart.getMonth(), naiveRangeStart.getDate() + 1)
+    : naiveRangeStart
   const rangeEnd = new Date(asOfDate.getFullYear() + 2, asOfDate.getMonth(), 1)
   // `transactions` MUST be passed through. Omitted, the generator falls
   // back to its default empty list, so its opening balance becomes
