@@ -9,6 +9,11 @@ import { Loans } from './pages/Loans'
 import { Bills } from './pages/Bills'
 import { Expenses } from './pages/Expenses'
 import { Scenarios } from './pages/Scenarios'
+// TEST APP ONLY (TEST-APP-DIVERGENCE.md): the sync-mode store and badge.
+import { selectLedgerStore } from './lib/store/selectLedgerStore'
+import { SyncModeBadge } from './components/SyncModeBadge'
+
+const ledgerStore = selectLedgerStore()
 
 /** #app-content is the app's only scroll container, so route changes need to reset its scroll manually. */
 function ScrollToTop({ containerRef }: { containerRef: React.RefObject<HTMLDivElement | null> }) {
@@ -23,7 +28,7 @@ function App() {
   const contentRef = useRef<HTMLDivElement>(null)
 
   return (
-    <LedgerProvider>
+    <LedgerProvider store={ledgerStore}>
       <AppGuards>
         <HashRouter>
           {/* The app shell is sized from --app-height (JS-measured in index.html,
@@ -37,6 +42,7 @@ function App() {
           >
             <div className="edge-fade edge-fade-top" />
             <div className="edge-fade edge-fade-bottom" />
+            {import.meta.env.VITE_SYNC_ENABLED === 'true' && <SyncModeBadge />}
             <div
               id="app-content"
               ref={contentRef}
