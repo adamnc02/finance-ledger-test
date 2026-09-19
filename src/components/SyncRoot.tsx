@@ -14,6 +14,11 @@
 // - An empty household (35 categories, no people) is never given a "Me"
 //   automatically (Adam, 2026-09-19: Ella's join path would carry it into
 //   his household as a duplicate). Import or Start fresh, chosen by the user.
+// - If the household changes under a running session (deleted on another
+//   device, or joined elsewhere), the store suspends itself and this boots
+//   again from ensure_household(), clearing the local copy first (UAT
+//   2026-09-19: a phone left open across "Delete my app data" re-sent a
+//   stale ledger into the deleted household).
 // - One local database per app, and per account on this device: if a
 //   different account signed in last, the local copy is cleared first, so
 //   nobody ever sees, or gates on, someone else's synced data.
@@ -30,7 +35,7 @@ import { AuthProvider, useAuth } from '../context/AuthContext'
 import { AuthGate } from './AuthGate'
 import { AccountModal } from './AccountModal'
 import { LEDGER_STREAM, POWERSYNC_DB_FILENAME, powerSyncConnector, powerSyncDb } from '../lib/powersync/database'
-import { getHouseholdId } from '../lib/powersync/household'
+import { clearHouseholdCache, getHouseholdId } from '../lib/powersync/household'
 import { powerSyncAdapter } from '../lib/powersync/powerSyncAdapter'
 import { createPowerSyncLedgerStore, type PowerSyncLedgerStore } from '../lib/store/powerSyncLedgerStore'
 import { defaultLedgerData, parseLedgerBackupJson } from '../lib/ledgerStorage'
@@ -104,6 +109,19 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
           userId,
           firstSync,
           storageKey: primaryPersonKey(userId),
+          // Deleted on another device, or (PROMPT-10) moved by a link code:
+          // drop this device's copy, including anything queued for the old
+          // household, and boot again so ensure_household() gives the current one.
+          onHouseholdLost: () => {
+            if (cancelled) return
+            setPhase({ kind: 'starting', line: 'Your household changed on another device. Syncing again…' })
+            void (async () => {
+              unsubscribe?.()
+              await powerSyncDb.disconnectAndClear()
+              clearHouseholdCache()
+              if (!cancelled) setAttempt((a) => a + 1)
+            })()
+          },
         })
         const current = await store.load() // resolves only after first sync
         if (cancelled || !current) return
@@ -223,6 +241,14 @@ function EmptyHousehold({ store, current, onDone }: { store: PowerSyncLedgerStor
   }
 
   const potDeposits = pending?.data.pots.filter((p) => p.recurringDepositAmount).length ?? 0
+
+  // Another device may fill the household (import, start fresh) while this one
+  // waits here: move on as soon as people arrive by sync.
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+  useEffect(() => store.subscribe?.((data) => {
+    if (data.people.length > 0) onDoneRef.current()
+  }), [store])
 
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center overflow-y-auto px-5 py-6" style={{ background: 'var(--color-bg)' }}>
