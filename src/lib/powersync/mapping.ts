@@ -32,7 +32,7 @@
 //   positions for writes (powerSyncLedgerStore), so that deleting never
 //   renumbers.
 // - salary_deductions.sort_order = index in its snapshot's list.
-// - jsonb columns are stored as CANONICAL JSON (keys sorted), because
+// - jsonb columns are CANONICAL JSON text locally (keys sorted), because
 //   Postgres re-orders jsonb keys: comparing raw strings would see a change
 //   on every round trip and write it back forever.
 // - Not synced: primaryPersonId (per device, the store handles it) and Pot's
@@ -108,7 +108,20 @@ function obj<T>(entries: Record<string, unknown>): T {
 const s = (v: Value | undefined): string | undefined => (v === null || v === undefined ? undefined : String(v))
 const n = (v: Value | undefined): number | undefined => (v === null || v === undefined || v === '' ? undefined : Number(v))
 const b = (v: Value | undefined): boolean | undefined => (v === null || v === undefined ? undefined : v === true || v === 1 || v === '1' || v === 'true')
-const j = <T>(v: Value | undefined): T | undefined => (v === null || v === undefined || v === '' ? undefined : (JSON.parse(String(v)) as T))
+// A jsonb value stored double-encoded (a JSON string holding JSON: what the
+// connector wrote before toServerRecord, UAT 2026-09-19) is unwrapped, with a
+// warning, rather than handing the app a string where it expects an object.
+let warnedDoubleEncoded = false
+function j<T>(v: Value | undefined): T | undefined {
+  if (v === null || v === undefined || v === '') return undefined
+  let parsed: unknown = JSON.parse(String(v))
+  if (typeof parsed === 'string' && /^\s*[[{]/.test(parsed)) {
+    if (!warnedDoubleEncoded) console.warn('[powersync] a jsonb value on the server is double-encoded (stored as a string); reading it anyway')
+    warnedDoubleEncoded = true
+    parsed = JSON.parse(parsed)
+  }
+  return parsed as T
+}
 // Down, required fields.
 const S = (v: Value | undefined): string => s(v) ?? ''
 const N = (v: Value | undefined): number => n(v) ?? 0

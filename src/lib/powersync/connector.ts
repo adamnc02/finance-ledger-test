@@ -8,6 +8,8 @@
 //   ever creates a row, so a null adds nothing on insert; but if the row
 //   already exists (two devices inserting one derived id) it would blank a
 //   column the other device set (e.g. people.linked_user_id).
+// - jsonb columns are sent as JSON values, not the TEXT SQLite holds, or
+//   Postgres stores a string and it syncs back as one (toServerRecord).
 // - A discarded write is logged LOUDLY and kept in a small local list the
 //   app can show (recordRejectedWrite), never silently dropped. The
 //   discard itself stays: a write Postgres permanently rejects would
@@ -16,7 +18,7 @@
 import type { AbstractPowerSyncDatabase, CrudEntry, PowerSyncBackendConnector } from '@powersync/web'
 import { UpdateType } from '@powersync/web'
 import { supabase } from '../supabaseClient'
-import { remoteName } from './tables'
+import { remoteName, toServerRecord } from './tables'
 
 const POWERSYNC_URL: string = import.meta.env.VITE_POWERSYNC_URL ?? ''
 if (!POWERSYNC_URL) {
@@ -58,10 +60,6 @@ export function readRejectedWrites(): RejectedWrite[] {
   }
 }
 
-export function withoutNulls(data: Record<string, unknown>): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(data).filter(([, v]) => v !== null && v !== undefined))
-}
-
 export class SupabaseConnector implements PowerSyncBackendConnector {
   async fetchCredentials() {
     const {
@@ -86,10 +84,10 @@ export class SupabaseConnector implements PowerSyncBackendConnector {
         let result
         switch (op.op) {
           case UpdateType.PUT:
-            result = await table.upsert({ ...withoutNulls(op.opData ?? {}), id: op.id })
+            result = await table.upsert({ ...toServerRecord(op.table, op.opData ?? {}, { dropNulls: true }), id: op.id })
             break
           case UpdateType.PATCH:
-            result = await table.update(op.opData ?? {}).eq('id', op.id)
+            result = await table.update(toServerRecord(op.table, op.opData ?? {}, { dropNulls: false })).eq('id', op.id)
             break
           case UpdateType.DELETE:
             result = await table.delete().eq('id', op.id)

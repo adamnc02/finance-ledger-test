@@ -15,13 +15,16 @@
 //  4. category ids carry '@<household>' on the way up and lose it coming down;
 //  5. derived ids are unique per table (no two app items collapse into one row);
 //  6. jsonb columns are canonical: re-ordering their keys (as Postgres does)
-//     maps back to the same string.
+//     maps back to the same string;
+//  7. the trip through the SERVER round-trips too: jsonb is sent as a JSON
+//     value, never the text SQLite holds (a string is stored as a jsonb string
+//     and comes back as one — UAT 2026-09-19, Home crashed on a loan).
 
 import { existsSync, readFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import { parseLedgerBackupJson } from '../src/lib/ledgerStorage'
 import { toRows, fromRows, canonicalJson, type Rows, type Row } from '../src/lib/powersync/mapping'
-import { SYNCED_TABLES } from '../src/lib/powersync/tables'
+import { SYNCED_TABLES, localName, toServerRecord } from '../src/lib/powersync/tables'
 import type { AppDataV2 } from '../src/types/ledger'
 
 let failures = 0
@@ -56,6 +59,36 @@ function throughSqlite(rows: Rows): Rows {
       for (const [k, v] of Object.entries(r)) {
         if (k === 'id') continue
         o[k] = cols[k] === 'bool' && v !== null ? (v ? 1 : 0) : v
+      }
+      return o
+    })
+  }
+  return out
+}
+
+/**
+ * The whole trip through the server: what the connector sends (toServerRecord),
+ * what Postgres keeps (jsonb holds whatever JSON VALUE it was sent; a string
+ * stays a string), and what PowerSync syncs back down (jsonb as its JSON text,
+ * booleans as 1/0). A TEXT column sent where a jsonb value belongs survives the
+ * local round trip but not this one (UAT 2026-09-19: Home crashed on a loan).
+ */
+function throughServer(rows: Rows): Rows {
+  const local = throughSqlite(rows)
+  const kinds = new Map(SYNCED_TABLES.map((t) => [t.remote, t.columns]))
+  const out: Rows = {}
+  for (const [table, list] of Object.entries(local)) {
+    const cols = kinds.get(table)!
+    out[table] = list.map((r) => {
+      const { id, ...data } = r
+      const sent = toServerRecord(localName(table), data, { dropNulls: true })
+      const o: Row = { id }
+      for (const c of Object.keys(cols)) {
+        const v = sent[c]
+        if (v === undefined || v === null) o[c] = null
+        else if (cols[c] === 'json') o[c] = JSON.stringify(v) // Postgres jsonb → text on the way down
+        else if (cols[c] === 'bool') o[c] = v === true ? 1 : 0
+        else o[c] = v as Row[string]
       }
       return o
     })
@@ -124,6 +157,14 @@ for (const path of backups) {
   }
   const diff = firstDiff(back, expected)
   check('app → rows → SQLite → app is deep-equal, same order', diff === null, diff ?? undefined)
+  const viaServer = fromRows(throughServer(rows))
+  const serverDiff = firstDiff(viaServer, expected)
+  check('…and through the server (connector → Postgres jsonb → sync) too', serverDiff === null, serverDiff ?? undefined)
+  const jsonCols = SYNCED_TABLES.flatMap((t) => Object.entries(t.columns).filter(([, k]) => k === 'json').map(([c]) => [t.remote, c] as const))
+  const sentAsString = jsonCols.flatMap(([table, col]) =>
+    throughSqlite(rows)[table].filter((r) => r[col] != null).map((r) => toServerRecord(localName(table), { [col]: r[col] }, { dropNulls: true })[col])
+      .filter((v) => typeof v === 'string').map(() => `${table}.${col}`))
+  check('no jsonb column is ever sent to Supabase as a string', sentAsString.length === 0, [...new Set(sentAsString)])
   if (name.startsWith('finance-ledger-backup')) check('real backup: no pot carries the superseded recurringDeposit* fields', droppedPotDeposits === 0, droppedPotDeposits)
   else if (droppedPotDeposits) console.log(`    (old test data: ${droppedPotDeposits} pot(s) with superseded recurringDeposit* fields, not synced — DECISIONS Q7)`)
 

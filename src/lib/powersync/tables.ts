@@ -149,3 +149,25 @@ export function tableSpec(remote: string): SyncedTable {
   if (!spec) throw new Error(`[powersync] unknown table: ${remote}`)
   return spec
 }
+
+/**
+ * What the connector sends to Supabase for one row (PUT) or one change set
+ * (PATCH). Local SQLite holds jsonb columns as TEXT; sent as-is, PostgREST
+ * stores that text in the jsonb column as a single JSON *string* — then it
+ * syncs back as a string, not the object (UAT 2026-09-19: a loan's
+ * recurringOverpayment came back without `amount` and Home crashed). So
+ * json columns are parsed back into values here, and 1/0 booleans become
+ * true/false. PUTs also drop nulls (see connector.ts).
+ */
+export function toServerRecord(localTable: string, data: Record<string, unknown>, opts: { dropNulls: boolean }): Record<string, unknown> {
+  const spec = tableSpec(remoteName(localTable)).columns
+  const out: Record<string, unknown> = {}
+  for (const [col, value] of Object.entries(data)) {
+    if (opts.dropNulls && (value === null || value === undefined)) continue
+    if (spec[col] === 'json' && typeof value === 'string') out[col] = JSON.parse(value)
+    // SQLite holds booleans as 1/0; send real booleans rather than rely on Postgres coercing '1'.
+    else if (spec[col] === 'bool' && (value === 0 || value === 1)) out[col] = value === 1
+    else out[col] = value
+  }
+  return out
+}
