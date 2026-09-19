@@ -98,6 +98,10 @@ export function AccountModal({ email, userId, householdId, onClose }: { email: s
           </p>
         </div>
 
+        {rejected.length === 0 && (
+          // Always say it, so "nothing rejected" is visible rather than inferred from an absent box (UAT 2026-09-19 step 10).
+          <p className="text-xs text-[var(--color-positive)] mb-4">No changes rejected by the server ✓</p>
+        )}
         {rejected.length > 0 && (
           <div className="rounded-xl p-3 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
             <p className="text-xs font-semibold text-[var(--color-negative)] mb-1">
