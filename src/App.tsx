@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef } from 'react'
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { LedgerProvider } from './context/LedgerContext'
 import { BottomNav } from './components/BottomNav'
@@ -12,8 +12,13 @@ import { Scenarios } from './pages/Scenarios'
 // TEST APP ONLY (TEST-APP-DIVERGENCE.md): the sync-mode store and badge.
 import { selectLedgerStore } from './lib/store/selectLedgerStore'
 import { SyncModeBadge } from './components/SyncModeBadge'
+import type { LedgerStore } from './lib/store/LedgerStore'
 
-const ledgerStore = selectLedgerStore()
+// Sync mode (the /sync/ build, PROMPT-09): sign-in, household, PowerSync and
+// the PowerSync store all live behind SyncRoot, loaded lazily inside the
+// flag check so the root build never contains any of it
+// (scripts/check-sync-build.ts proves it).
+const SyncRoot = import.meta.env.VITE_SYNC_ENABLED === 'true' ? lazy(() => import('./components/SyncRoot')) : null
 
 /** #app-content is the app's only scroll container, so route changes need to reset its scroll manually. */
 function ScrollToTop({ containerRef }: { containerRef: React.RefObject<HTMLDivElement | null> }) {
@@ -25,10 +30,21 @@ function ScrollToTop({ containerRef }: { containerRef: React.RefObject<HTMLDivEl
 }
 
 function App() {
+  if (import.meta.env.VITE_SYNC_ENABLED === 'true' && SyncRoot) {
+    return (
+      <Suspense fallback={null}>
+        <SyncRoot>{(store) => <LedgerApp store={store} />}</SyncRoot>
+      </Suspense>
+    )
+  }
+  return <LedgerApp store={selectLedgerStore()} />
+}
+
+function LedgerApp({ store }: { store: LedgerStore }) {
   const contentRef = useRef<HTMLDivElement>(null)
 
   return (
-    <LedgerProvider store={ledgerStore}>
+    <LedgerProvider store={store}>
       <AppGuards>
         <HashRouter>
           {/* The app shell is sized from --app-height (JS-measured in index.html,
