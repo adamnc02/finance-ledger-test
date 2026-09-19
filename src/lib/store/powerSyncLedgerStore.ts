@@ -128,6 +128,8 @@ export interface PowerSyncLedgerStore extends LedgerStore {
   flush(): Promise<void>
   /** The last import's old → new ids (null before any import). For checks. */
   readonly importMap: ReadonlyMap<string, string> | null
+  /** The person row linked to the signed-in user ("Set as me"), as of the last read. */
+  readonly linkedPersonId: string | null
 }
 
 export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): PowerSyncLedgerStore {
@@ -251,6 +253,9 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     },
     get importMap() {
       return importMap
+    },
+    get linkedPersonId() {
+      return [...linkedTo].find(([, uid]) => uid === userId)?.[0] ?? null
     },
 
     async load() {
