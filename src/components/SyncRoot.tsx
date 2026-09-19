@@ -21,7 +21,7 @@
 // Rendered only in the /sync/ build (App.tsx, lazy); the root build never
 // contains it (check-sync-build.ts).
 
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Component, useEffect, useRef, useState, type ErrorInfo, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { User } from 'lucide-react'
 import type { AppDataV2 } from '../types/ledger'
@@ -143,10 +143,43 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
   }
   return (
     <>
-      {children(phase.store)}
+      <LedgerErrorBoundary>{children(phase.store)}</LedgerErrorBoundary>
       {account}
     </>
   )
+}
+
+/**
+ * A render error in the ledger used to blank the whole page, Account button
+ * included (UAT 2026-09-19, step 4). This shows what broke, and the Account
+ * button (a sibling, outside this boundary) stays usable.
+ */
+class LedgerErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null }
+  static getDerivedStateFromError(error: Error) {
+    return { error }
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error('[sync] the ledger crashed while rendering', error, info.componentStack)
+  }
+  render() {
+    const { error } = this.state
+    if (!error) return this.props.children
+    return (
+      <div className="fixed inset-0 z-[10000] overflow-y-auto px-5 py-10" style={{ background: 'var(--color-bg)' }}>
+        <div className="max-w-md mx-auto">
+          <div className="font-display text-xl font-bold text-[var(--color-ink)] mb-2">Something in the ledger crashed</div>
+          <p className="text-sm text-[var(--color-ink-muted)] mb-3">Your data is safe on the server. Please copy the text below and send it over.</p>
+          <pre className="text-[11px] leading-snug whitespace-pre-wrap break-words rounded-xl p-3 text-[var(--color-ink)] select-all" style={{ background: 'var(--color-surface)' }}>
+            {`${error.name}: ${error.message}\n\n${(error.stack ?? '').split('\n').slice(0, 12).join('\n')}`}
+          </pre>
+          <button onClick={() => window.location.reload()} className="mt-4 w-full py-3 rounded-2xl font-semibold text-[var(--color-surface)] bg-[var(--color-ink)]">
+            Reload
+          </button>
+        </div>
+      </div>
+    )
+  }
 }
 
 function FullScreen({ title, line, spinner, children }: { title: string; line: string; spinner?: boolean; children?: ReactNode }) {
