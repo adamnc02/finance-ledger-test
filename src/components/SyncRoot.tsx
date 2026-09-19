@@ -242,6 +242,14 @@ function EmptyHousehold({ store, current, onDone }: { store: PowerSyncLedgerStor
 
   const potDeposits = pending?.data.pots.filter((p) => p.recurringDepositAmount).length ?? 0
 
+  // Another device may fill the household (import, start fresh) while this one
+  // waits here: move on as soon as people arrive by sync.
+  const onDoneRef = useRef(onDone)
+  onDoneRef.current = onDone
+  useEffect(() => store.subscribe?.((data) => {
+    if (data.people.length > 0) onDoneRef.current()
+  }), [store])
+
   return (
     <div className="fixed inset-0 z-[10000] flex items-center justify-center overflow-y-auto px-5 py-6" style={{ background: 'var(--color-bg)' }}>
       <div className="w-full max-w-[360px] mx-auto text-center">

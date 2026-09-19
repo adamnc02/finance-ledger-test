@@ -35,7 +35,7 @@ function useSyncStatus() {
 export function AccountModal({ email, userId, householdId, onClose }: { email: string; userId: string; householdId: string; onClose: () => void }) {
   const { signOut } = useAuth()
   const status = useSyncStatus()
-  const rejected = readRejectedWrites()
+  const [rejected, setRejected] = useState(readRejectedWrites)
   const [confirming, setConfirming] = useState<0 | 1 | 2>(0)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -104,9 +104,24 @@ export function AccountModal({ email, userId, householdId, onClose }: { email: s
         )}
         {rejected.length > 0 && (
           <div className="rounded-xl p-3 mb-4" style={{ background: 'var(--color-bg-elevated)' }}>
-            <p className="text-xs font-semibold text-[var(--color-negative)] mb-1">
-              {rejected.length} change(s) were rejected by the server and are not saved there
-            </p>
+            <div className="flex items-start justify-between gap-2 mb-1">
+              <p className="text-xs font-semibold text-[var(--color-negative)]">
+                {rejected.length} change(s) were rejected by the server and are not saved there
+              </p>
+              <button
+                onClick={() => {
+                  try {
+                    localStorage.removeItem(REJECTED_WRITES_KEY)
+                  } catch {
+                    /* ignore */
+                  }
+                  setRejected([])
+                }}
+                className="text-[11px] font-semibold text-[var(--color-ink-muted)] shrink-0"
+              >
+                Clear
+              </button>
+            </div>
             {rejected.slice(0, 5).map((r, i) => (
               <p key={i} className="text-[11px] text-[var(--color-ink-muted)] break-all">
                 {r.at.slice(0, 16).replace('T', ' ')} · {r.op} {r.table} · {r.code} {r.message}
