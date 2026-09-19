@@ -2,22 +2,15 @@
 // `personal-ledger` renders <LedgerProvider> with its default store, and
 // `shared-finance-ledger` wires its real store directly, with no flag.
 //
-// Sync mode (`--mode sync`, the /sync/ build) stands in for
-// `shared-finance-ledger`. Until PROMPT-09 builds the PowerSync store, it is
-// the same localStorage store under a SEPARATE key. Every build and both live
-// apps share the adamnc02.github.io origin, and so one localStorage, so this
-// key is all that keeps flicking modes from touching real offline data.
-//
-// The check is written out against import.meta.env inline, so Vite replaces
-// it with a constant and the sync branch is dropped from the normal build
-// (scripts/check-sync-build.ts proves it).
+// The offline (root) build's store. Since PROMPT-09 the /sync/ build no
+// longer comes through here: its store is the PowerSync one, created by
+// components/SyncRoot.tsx after sign-in (it needs the household), and App.tsx
+// renders that instead. The old sync-preview key
+// ('ledger:app-data-v2:v1:sync-preview') is no longer read or written.
 
 import type { LedgerStore } from './LedgerStore'
-import { createLocalStorageLedgerStore, localStorageLedgerStore } from './localStorageLedgerStore'
+import { localStorageLedgerStore } from './localStorageLedgerStore'
 
 export function selectLedgerStore(): LedgerStore {
-  if (import.meta.env.VITE_SYNC_ENABLED === 'true') {
-    return createLocalStorageLedgerStore({ key: 'ledger:app-data-v2:v1:sync-preview' })
-  }
   return localStorageLedgerStore
 }
