@@ -2,7 +2,8 @@
 // in the sync app, in the order PROMPT-09 §3.2b requires:
 //
 //   sign in → ensure_household() → connect (this app's stream only) →
-//   wait for first sync → empty household? Import / Start fresh : the ledger
+//   wait for first sync → empty household? Import / Start fresh / Join :
+//   the ledger
 //
 // - ensure_household() runs BEFORE the first sync counts: a brand-new user
 //   has no household until it runs, so the stream would report "synced" with
@@ -13,15 +14,22 @@
 //   personal-f's stream is auto-subscribed and must not download here.
 // - An empty household (35 categories, no people) is never given a "Me"
 //   automatically (Adam, 2026-09-19: Ella's join path would carry it into
-//   his household as a duplicate). Import or Start fresh, chosen by the user.
+//   his household as a duplicate). LegacyDataMigration offers this device's
+//   old data, a backup file, Start fresh, or joining with a code.
 // - If the household changes under a running session (deleted on another
 //   device, or joined elsewhere), the store suspends itself and this boots
 //   again from ensure_household(), clearing the local copy first (UAT
 //   2026-09-19: a phone left open across "Delete my app data" re-sent a
-//   stale ledger into the deleted household).
+//   stale ledger into the deleted household). PROMPT-10: redeeming a link
+//   code reboots the same way, deliberately — the joiner's data is moved
+//   SERVER-side and the local copy must not be assumed to follow.
 // - One local database per app, and per account on this device: if a
 //   different account signed in last, the local copy is cleared first, so
 //   nobody ever sees, or gates on, someone else's synced data.
+// - The Account button lives in the Wallet header once the ledger is up
+//   (HeaderAccessory, shared) and floats on the boot screens, where there is
+//   no header to put it in but sign-out and Delete my app data must still be
+//   reachable.
 //
 // Rendered only in the /sync/ build (App.tsx, lazy); the root build never
 // contains it (check-sync-build.ts).
@@ -32,18 +40,24 @@ import { User } from 'lucide-react'
 import type { AppDataV2 } from '../types/ledger'
 import type { LedgerStore } from '../lib/store/LedgerStore'
 import { AuthProvider, useAuth } from '../context/AuthContext'
+import { useLedgerData } from '../context/LedgerContext'
 import { AuthGate } from './AuthGate'
 import { AccountModal } from './AccountModal'
+import { DuplicatePersonBanner } from './DuplicatePersonBanner'
+import { HeaderAccessoryContext } from './HeaderAccessory'
+import { SyncControlsContext, type SyncControls } from './syncControls'
+import { LegacyDataMigration } from './LegacyDataMigration'
 import { LEDGER_STREAM, POWERSYNC_DB_FILENAME, powerSyncConnector, powerSyncDb } from '../lib/powersync/database'
 import { clearHouseholdCache, getHouseholdId } from '../lib/powersync/household'
+import { justJoinedKey } from '../lib/powersync/linking'
 import { powerSyncAdapter } from '../lib/powersync/powerSyncAdapter'
+import { maybeUploadDailySnapshot } from '../lib/powersync/backup'
 import { createPowerSyncLedgerStore, type PowerSyncLedgerStore } from '../lib/store/powerSyncLedgerStore'
-import { defaultLedgerData, parseLedgerBackupJson } from '../lib/ledgerStorage'
 
 export const LAST_USER_KEY = `ledger:sync:db-user:${POWERSYNC_DB_FILENAME}`
 export const primaryPersonKey = (userId: string) => `ledger:sync:primary-person:${POWERSYNC_DB_FILENAME}:${userId}`
 
-export default function SyncRoot({ children }: { children: (store: LedgerStore) => ReactNode }) {
+export default function SyncRoot({ children }: { children: (store: LedgerStore, extras: ReactNode) => ReactNode }) {
   return (
     <AuthProvider>
       <Gate>{children}</Gate>
@@ -51,7 +65,7 @@ export default function SyncRoot({ children }: { children: (store: LedgerStore) 
   )
 }
 
-function Gate({ children }: { children: (store: LedgerStore) => ReactNode }) {
+function Gate({ children }: { children: (store: LedgerStore, extras: ReactNode) => ReactNode }) {
   const { session } = useAuth()
   if (session === undefined) return <FullScreen title="Shared Ledger" line="Checking sign-in…" />
   if (session === null) return <AuthGate />
@@ -66,12 +80,24 @@ type Phase =
   | { kind: 'starting'; line: string }
   | { kind: 'error'; message: string }
   | { kind: 'empty'; store: PowerSyncLedgerStore; current: AppDataV2 }
+  | { kind: 'claim'; store: PowerSyncLedgerStore; current: AppDataV2 }
   | { kind: 'ready'; store: PowerSyncLedgerStore }
 
-function SignedIn({ userId, email, children }: { userId: string; email: string; children: (store: LedgerStore) => ReactNode }) {
+function SignedIn({ userId, email, children }: { userId: string; email: string; children: (store: LedgerStore, extras: ReactNode) => ReactNode }) {
   const [phase, setPhase] = useState<Phase>({ kind: 'starting', line: 'Finding your household…' })
   const [householdId, setHouseholdId] = useState('')
   const [attempt, setAttempt] = useState(0)
+  const restartLine = useRef('Syncing your household…')
+
+  const restart = (line?: string) => {
+    restartLine.current = line ?? 'Syncing your household…'
+    setPhase({ kind: 'starting', line: restartLine.current })
+    void (async () => {
+      await powerSyncDb.disconnectAndClear()
+      clearHouseholdCache()
+      setAttempt((a) => a + 1)
+    })()
+  }
 
   useEffect(() => {
     let cancelled = false
@@ -98,7 +124,7 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
           }
         }
 
-        setPhase({ kind: 'starting', line: 'Syncing your household…' })
+        setPhase({ kind: 'starting', line: restartLine.current })
         await powerSyncDb.connect(powerSyncConnector, { includeDefaultStreams: false })
         const sub = await powerSyncDb.syncStream(LEDGER_STREAM).subscribe()
         unsubscribe = () => sub.unsubscribe()
@@ -109,23 +135,26 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
           userId,
           firstSync,
           storageKey: primaryPersonKey(userId),
-          // Deleted on another device, or (PROMPT-10) moved by a link code:
-          // drop this device's copy, including anything queued for the old
-          // household, and boot again so ensure_household() gives the current one.
+          // Deleted on another device, or moved by a link code redeemed
+          // elsewhere: drop this device's copy, including anything queued for
+          // the old household, and boot again so ensure_household() gives the
+          // current one.
           onHouseholdLost: () => {
             if (cancelled) return
-            setPhase({ kind: 'starting', line: 'Your household changed on another device. Syncing again…' })
-            void (async () => {
-              unsubscribe?.()
-              await powerSyncDb.disconnectAndClear()
-              clearHouseholdCache()
-              if (!cancelled) setAttempt((a) => a + 1)
-            })()
+            restart('Your household changed on another device. Syncing again…')
           },
         })
         const current = await store.load() // resolves only after first sync
         if (cancelled || !current) return
-        setPhase(current.people.length === 0 ? { kind: 'empty', store, current } : { kind: 'ready', store })
+        restartLine.current = 'Syncing your household…'
+        if (current.people.length === 0) return setPhase({ kind: 'empty', store, current })
+        // Just joined, brought nothing, and no row is linked to me yet: ask
+        // which person is me once, rather than leaving the partner's
+        // dashboard showing (it resolves to the first person otherwise).
+        if (justJoined(userId) && store.linkedPersonId === null) {
+          return setPhase({ kind: 'claim', store, current })
+        }
+        setPhase({ kind: 'ready', store })
       } catch (err) {
         console.error('[sync] could not start', err)
         if (!cancelled) setPhase({ kind: 'error', message: err instanceof Error ? err.message : String(err) })
@@ -138,39 +167,141 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
     }
   }, [userId, attempt])
 
-  const account = <AccountButton email={email} userId={userId} householdId={householdId} />
-
-  if (phase.kind === 'starting') return <FullScreen title="Shared Ledger" line={phase.line} spinner>{account}</FullScreen>
-  if (phase.kind === 'error') {
-    return (
-      <FullScreen title="Couldn't start syncing" line={phase.message}>
-        <button onClick={() => setAttempt((a) => a + 1)} className="mt-6 px-5 py-2.5 rounded-2xl text-sm font-semibold text-[var(--color-surface)] bg-[var(--color-ink)]">
-          Try again
-        </button>
-        {account}
-      </FullScreen>
-    )
+  const controls: SyncControls = {
+    userId,
+    email,
+    householdId,
+    restart,
+    forceSync: async () => {
+      await powerSyncDb.disconnect()
+      await powerSyncDb.connect(powerSyncConnector, { includeDefaultStreams: false })
+    },
   }
-  if (phase.kind === 'empty') {
-    return (
-      <>
-        <EmptyHousehold store={phase.store} current={phase.current} onDone={() => setPhase({ kind: 'ready', store: phase.store })} />
-        {account}
-      </>
-    )
+
+  const floatingAccount = <AccountButton floating />
+
+  return (
+    <SyncControlsContext.Provider value={controls}>
+      {phase.kind === 'starting' && <FullScreen title="Shared Ledger" line={phase.line} spinner>{floatingAccount}</FullScreen>}
+      {phase.kind === 'error' && (
+        <FullScreen title="Couldn't start syncing" line={phase.message}>
+          <button onClick={() => setAttempt((a) => a + 1)} className="mt-6 px-5 py-2.5 rounded-2xl text-sm font-semibold text-[var(--color-surface)] bg-[var(--color-ink)]">
+            Try again
+          </button>
+          {floatingAccount}
+        </FullScreen>
+      )}
+      {phase.kind === 'empty' && (
+        <>
+          <LegacyDataMigration
+            store={phase.store}
+            current={phase.current}
+            userId={userId}
+            onDone={() => setPhase({ kind: 'ready', store: phase.store })}
+            onJoined={(line) => restart(line)}
+          />
+          {floatingAccount}
+        </>
+      )}
+      {phase.kind === 'claim' && (
+        <>
+          <WhichPersonAmI store={phase.store} current={phase.current} userId={userId} onDone={() => setPhase({ kind: 'ready', store: phase.store })} />
+          {floatingAccount}
+        </>
+      )}
+      {phase.kind === 'ready' && (
+        <HeaderAccessoryContext.Provider value={<AccountButton />}>
+          <LedgerErrorBoundary>
+            {children(
+              phase.store,
+              <>
+                <DuplicatePersonBanner userId={userId} />
+                <DailyBackup userId={userId} />
+              </>,
+            )}
+          </LedgerErrorBoundary>
+        </HeaderAccessoryContext.Provider>
+      )}
+    </SyncControlsContext.Provider>
+  )
+}
+
+const justJoined = (userId: string) => {
+  try {
+    return localStorage.getItem(justJoinedKey(userId)) !== null
+  } catch {
+    return false
+  }
+}
+const forgetJustJoined = (userId: string) => {
+  try {
+    localStorage.removeItem(justJoinedKey(userId))
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Straight after joining a household with nothing of your own: which of these people is you?
+ * Choosing writes people.linked_user_id through the store ("Set as me"), so every device of yours
+ * resolves to that person from then on.
+ */
+function WhichPersonAmI({ store, current, userId, onDone }: { store: PowerSyncLedgerStore; current: AppDataV2; userId: string; onDone: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const choose = async (id: string) => {
+    setBusy(true)
+    store.save({ ...current, primaryPersonId: id }, current)
+    await store.flush()
+    forgetJustJoined(userId)
+    onDone()
   }
   return (
-    <>
-      <LedgerErrorBoundary>{children(phase.store)}</LedgerErrorBoundary>
-      {account}
-    </>
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center overflow-y-auto px-5 py-6" style={{ background: 'var(--color-bg)' }}>
+      <div className="w-full max-w-[360px] mx-auto text-center">
+        <div className="font-display text-2xl font-bold text-[var(--color-ink)] mb-2">You're in</div>
+        <p className="text-sm text-[var(--color-ink-muted)] mb-6">Which of these is you? Your dashboard, pay cycle and personal bills follow this choice, on every device you sign in on.</p>
+        <div className="space-y-2">
+          {current.people.map((p) => (
+            <button
+              key={p.id}
+              disabled={busy}
+              onClick={() => void choose(p.id)}
+              className="w-full py-3 rounded-2xl font-semibold text-sm text-[var(--color-surface)] bg-[var(--color-ink)] disabled:opacity-60"
+            >
+              {p.name}
+            </button>
+          ))}
+          <button
+            disabled={busy}
+            onClick={() => (forgetJustJoined(userId), onDone())}
+            className="w-full py-3 rounded-2xl font-medium text-sm text-[var(--color-ink)] disabled:opacity-60"
+            style={{ background: 'var(--color-surface)' }}
+          >
+            I'll do this later
+          </button>
+        </div>
+        <p className="text-[11px] text-[var(--color-ink-faint)] mt-4">You can change it any time in Wallet → People → Set as me.</p>
+      </div>
+    </div>
   )
+}
+
+/** One cloud snapshot a day, silently (BUILD-PLAN 4.5). Inside the ledger, so it has the data. */
+function DailyBackup({ userId }: { userId: string }) {
+  const { data } = useLedgerData()
+  const attempted = useRef(false)
+  useEffect(() => {
+    if (attempted.current || data.people.length === 0) return
+    attempted.current = true
+    void maybeUploadDailySnapshot(userId, data)
+  }, [userId, data])
+  return null
 }
 
 /**
  * A render error in the ledger used to blank the whole page, Account button
  * included (UAT 2026-09-19, step 4). This shows what broke, and the Account
- * button (a sibling, outside this boundary) stays usable.
+ * button (rendered by this boundary's fallback) stays usable.
  */
 class LedgerErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null }
@@ -195,6 +326,7 @@ class LedgerErrorBoundary extends Component<{ children: ReactNode }, { error: Er
             Reload
           </button>
         </div>
+        <AccountButton floating />
       </div>
     )
   }
@@ -212,111 +344,40 @@ function FullScreen({ title, line, spinner, children }: { title: string; line: s
 }
 
 /**
- * A household with no people yet: import a backup, or start fresh. Both go
- * through the store's save(), i.e. the same narrow-diff path as every edit,
- * after first sync. "Join a household with a code" arrives with PROMPT-10's
- * linking UI.
+ * In the Wallet header (HeaderAccessory) once the ledger is up, where it scrolls with the page and
+ * sits beside People; floating on the boot screens, which have no header. Inside the ledger it hands
+ * the modal the ledger itself, which is what Cloud Backup's Back Up Now / Restore need.
  */
-function EmptyHousehold({ store, current, onDone }: { store: PowerSyncLedgerStore; current: AppDataV2; onDone: () => void }) {
-  const fileRef = useRef<HTMLInputElement>(null)
-  const [pending, setPending] = useState<{ data: AppDataV2; name: string } | null>(null)
-  const [error, setError] = useState<string | null>(null)
-  const [busy, setBusy] = useState(false)
-
-  const commit = async (next: AppDataV2) => {
-    setBusy(true)
-    store.save(next, current)
-    await store.flush()
-    onDone()
-  }
-
-  const onFile = async (file: File | undefined) => {
-    if (!file) return
-    setError(null)
-    try {
-      setPending({ data: parseLedgerBackupJson(await file.text()), name: file.name })
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'That file could not be read as a ledger backup.')
-    }
-  }
-
-  const potDeposits = pending?.data.pots.filter((p) => p.recurringDepositAmount).length ?? 0
-
-  // Another device may fill the household (import, start fresh) while this one
-  // waits here: move on as soon as people arrive by sync.
-  const onDoneRef = useRef(onDone)
-  onDoneRef.current = onDone
-  useEffect(() => store.subscribe?.((data) => {
-    if (data.people.length > 0) onDoneRef.current()
-  }), [store])
-
+function AccountButton({ floating }: { floating?: boolean }) {
+  const [open, setOpen] = useState(false)
+  const button = (
+    <button
+      onClick={() => setOpen(true)}
+      aria-label="Account"
+      className={
+        floating
+          ? 'fixed z-[10001] w-8 h-8 rounded-full flex items-center justify-center border'
+          : 'w-9 h-9 rounded-full flex items-center justify-center'
+      }
+      style={
+        floating
+          ? { top: 'calc(var(--safe-top, 0px) + 6px)', right: 12, background: 'var(--color-bg-elevated)', borderColor: 'var(--color-track)' }
+          : { background: 'var(--color-surface)' }
+      }
+    >
+      <User size={floating ? 15 : 18} className={floating ? 'text-[var(--color-ink-muted)]' : 'text-[var(--color-ink)]'} />
+    </button>
+  )
   return (
-    <div className="fixed inset-0 z-[10000] flex items-center justify-center overflow-y-auto px-5 py-6" style={{ background: 'var(--color-bg)' }}>
-      <div className="w-full max-w-[360px] mx-auto text-center">
-        <div className="font-display text-2xl font-bold text-[var(--color-ink)] mb-2">Your household is empty</div>
-        <p className="text-sm text-[var(--color-ink-muted)] mb-6">Bring in your data from a backup file, or start with a blank ledger.</p>
-
-        {!pending ? (
-          <div className="space-y-3">
-            <button disabled={busy} onClick={() => fileRef.current?.click()} className="w-full py-3 rounded-2xl font-semibold text-[var(--color-surface)] bg-[var(--color-ink)] disabled:opacity-60">
-              Import a backup file
-            </button>
-            <button
-              disabled={busy}
-              onClick={() => {
-                const d = defaultLedgerData() // a fresh 'Me' (new id) and their pay cycle; categories already exist server-side
-                void commit({ ...current, people: d.people, payCycles: d.payCycles, primaryPersonId: d.primaryPersonId })
-              }}
-              className="w-full py-3 rounded-2xl font-medium text-sm text-[var(--color-ink)] disabled:opacity-60"
-              style={{ background: 'var(--color-surface)' }}
-            >
-              Start fresh
-            </button>
-            <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => void onFile(e.target.files?.[0])} />
-          </div>
-        ) : (
-          <div className="rounded-2xl p-4 text-left space-y-2" style={{ background: 'var(--color-surface)' }}>
-            <p className="text-sm font-semibold text-[var(--color-ink)] break-words">{pending.name}</p>
-            <p className="text-xs text-[var(--color-ink-muted)]">
-              {pending.data.people.length} people · {pending.data.recurringTemplates.length} bills &amp; recurring · {pending.data.loans.length} loans ·{' '}
-              {pending.data.creditCards.length} cards · {pending.data.transactions.length} transactions
-            </p>
-            <p className="text-xs text-[var(--color-ink-muted)]">This becomes your household's data on every device signed in to it.</p>
-            {potDeposits > 0 && (
-              <p className="text-xs text-[var(--color-negative)]">
-                {potDeposits} pot(s) use the old pot recurring deposit, which doesn't sync. Set those up as recurring transfers after importing.
-              </p>
-            )}
-            <div className="flex gap-2 pt-2">
-              <button disabled={busy} onClick={() => setPending(null)} className="flex-1 py-2.5 rounded-xl text-sm text-[var(--color-ink-muted)]" style={{ background: 'var(--color-track)' }}>
-                Back
-              </button>
-              <button disabled={busy} onClick={() => void commit(pending.data)} className="flex-1 py-2.5 rounded-xl text-sm font-semibold text-[var(--color-surface)] bg-[var(--color-ink)] disabled:opacity-60">
-                {busy ? 'Importing…' : 'Import'}
-              </button>
-            </div>
-          </div>
-        )}
-        {error && <p className="text-xs text-[var(--color-negative)] mt-3">{error}</p>}
-      </div>
-    </div>
+    <>
+      {floating ? createPortal(button, document.body) : button}
+      {open && (floating ? <AccountModal onClose={() => setOpen(false)} /> : <AccountModalWithLedger onClose={() => setOpen(false)} />)}
+    </>
   )
 }
 
-function AccountButton({ email, userId, householdId }: { email: string; userId: string; householdId: string }) {
-  const [open, setOpen] = useState(false)
-  return createPortal(
-    <>
-      <button
-        onClick={() => setOpen(true)}
-        aria-label="Account"
-        className="fixed z-[10001] w-8 h-8 rounded-full flex items-center justify-center border"
-        style={{ top: 'calc(var(--safe-top, 0px) + 6px)', right: 12, background: 'var(--color-bg-elevated)', borderColor: 'var(--color-track)' }}
-      >
-        <User size={15} className="text-[var(--color-ink-muted)]" />
-      </button>
-      {open && <AccountModal email={email} userId={userId} householdId={householdId} onClose={() => setOpen(false)} />}
-    </>,
-    document.body,
-  )
+/** Inside the ledger: the modal gets the data and setData (Cloud Backup). */
+function AccountModalWithLedger({ onClose }: { onClose: () => void }) {
+  const { data, setData } = useLedgerData()
+  return <AccountModal ledger={{ data, setData }} onClose={onClose} />
 }

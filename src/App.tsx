@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect, useRef, type ReactNode } from 'react'
 import { HashRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { LedgerProvider } from './context/LedgerContext'
 import { BottomNav } from './components/BottomNav'
@@ -33,18 +33,21 @@ function App() {
   if (import.meta.env.VITE_SYNC_ENABLED === 'true' && SyncRoot) {
     return (
       <Suspense fallback={null}>
-        <SyncRoot>{(store) => <LedgerApp store={store} />}</SyncRoot>
+        <SyncRoot>{(store, extras) => <LedgerApp store={store} extras={extras} />}</SyncRoot>
       </Suspense>
     )
   }
   return <LedgerApp store={selectLedgerStore()} />
 }
 
-function LedgerApp({ store }: { store: LedgerStore }) {
+function LedgerApp({ store, extras }: { store: LedgerStore; extras?: ReactNode }) {
   const contentRef = useRef<HTMLDivElement>(null)
 
   return (
     <LedgerProvider store={store}>
+      {/* Sync mode only: the duplicate-person banner and the daily cloud backup, which
+          need the ledger around them (SyncRoot hands them over). */}
+      {extras}
       <AppGuards>
         <HashRouter>
           {/* The app shell is sized from --app-height (JS-measured in index.html,
