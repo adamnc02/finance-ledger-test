@@ -45,6 +45,7 @@ import { AuthGate } from './AuthGate'
 import { AccountModal } from './AccountModal'
 import { DuplicatePersonBanner } from './DuplicatePersonBanner'
 import { HeaderAccessoryContext } from './HeaderAccessory'
+import { BackupPlacementContext } from './BackupSection'
 import { SyncControlsContext, type SyncControls } from './syncControls'
 import { LegacyDataMigration } from './LegacyDataMigration'
 import { LEDGER_STREAM, POWERSYNC_DB_FILENAME, powerSyncConnector, powerSyncDb } from '../lib/powersync/database'
@@ -210,16 +211,21 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
         </>
       )}
       {phase.kind === 'ready' && (
+        // 'account' claims the Wallet page's Backup slot away, so the only
+        // door to a whole-household replace is the Account modal (PROMPT-14
+        // §0 Q2). The offline apps provide nothing and keep the Wallet card.
         <HeaderAccessoryContext.Provider value={<AccountButton />}>
-          <LedgerErrorBoundary>
-            {children(
-              phase.store,
-              <>
-                <DuplicatePersonBanner userId={userId} />
-                <DailyBackup userId={userId} />
-              </>,
-            )}
-          </LedgerErrorBoundary>
+          <BackupPlacementContext.Provider value="account">
+            <LedgerErrorBoundary>
+              {children(
+                phase.store,
+                <>
+                  <DuplicatePersonBanner userId={userId} />
+                  <DailyBackup userId={userId} />
+                </>,
+              )}
+            </LedgerErrorBoundary>
+          </BackupPlacementContext.Provider>
         </HeaderAccessoryContext.Provider>
       )}
     </SyncControlsContext.Provider>
