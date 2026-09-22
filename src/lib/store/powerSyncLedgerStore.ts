@@ -94,6 +94,67 @@ export function isImport(next: AppDataV2, known: WeakSet<object>): boolean {
   return LISTS.every((k) => !known.has(next[k]))
 }
 
+/** The one op shape "Set as me" and Part 5's re-link both write: one column, one row. */
+export type LinkUpdate = Extract<Op, { kind: 'update' }> & { set: { linked_user_id: string } }
+
+/**
+ * 🚨 PROMPT-14 Part 5 — a restore must not silently reassign who everyone is.
+ *
+ * An import deletes every `people` row and inserts a fresh one (regenerateIds, §31), and
+ * `linked_user_id` is a server-only column `toRows` never writes — so every OTHER member's link
+ * dies with their old row. `linkOps` re-links only the person doing the restore. On Ella's next
+ * sync, `assemble` walks choice → linked → people[0]: her stored choice is a dead id and there is
+ * no linked row, so **she silently becomes whoever sorts first, and her pay cycle flips**. That is
+ * the §23 failure `verify-first-sync-gate.ts` exists to prevent, arriving through a door it does
+ * not watch.
+ *
+ * So: carry each pre-restore link across to the incoming person **with the same name** (§0 Q4a).
+ *
+ * 🚨 Ambiguous or missing → DO NOT GUESS. No match, or more than one, leaves that member
+ * unlinked, and their device asks "which person are you?" on its next boot (§0 Q4b, the flow a
+ * fresh join already uses). "Just take the first match" is the same silent reassignment wearing a
+ * different hat — it is the bug, not a simplification of the fix.
+ *
+ * Names are compared trimmed and case-insensitively, because a restore of a hand-edited file is
+ * exactly where "Ella" becomes "ella".
+ *
+ * @param linked   person id → linked_user_id, as the DATABASE holds it right now (pre-restore)
+ * @param before   the data those ids belong to (the shadow), for looking a person's name up
+ * @param after    the incoming data, AFTER regenerateIds — the ids that will exist
+ * @param exclude  a person id already being linked by linkOps (the restorer's own): never touched here
+ */
+export function relinkOps(
+  linked: ReadonlyMap<string, string>,
+  before: AppDataV2,
+  after: AppDataV2,
+  myUserId: string,
+  exclude: string | null,
+): { ops: LinkUpdate[]; unresolved: string[] } {
+  const ops: LinkUpdate[] = []
+  const unresolved: string[] = []
+  const namesBefore = new Map(before.people.map((p) => [p.id, p.name]))
+  const byName = new Map<string, string[]>()
+  for (const p of after.people) {
+    const key = p.name.trim().toLowerCase()
+    byName.set(key, [...(byName.get(key) ?? []), p.id])
+  }
+  for (const [personId, userId] of linked) {
+    if (userId === myUserId) continue // linkOps owns mine
+    const name = namesBefore.get(personId)
+    if (name === undefined) {
+      unresolved.push(userId)
+      continue
+    }
+    const matches = (byName.get(name.trim().toLowerCase()) ?? []).filter((id) => id !== exclude)
+    if (matches.length !== 1) {
+      unresolved.push(userId)
+      continue
+    }
+    ops.push({ kind: 'update', table: 'people', id: matches[0], set: { linked_user_id: userId } })
+  }
+  return { ops, unresolved }
+}
+
 /** What the store needs from the database; the real one wraps PowerSync (powerSyncAdapter.ts), tests pass a fake. */
 export interface SyncDatabase {
   /** Every synced table's rows, keyed by Postgres table name, in one consistent read. */
@@ -130,6 +191,12 @@ export interface PowerSyncLedgerStore extends LedgerStore {
   readonly importMap: ReadonlyMap<string, string> | null
   /** The person row linked to the signed-in user ("Set as me"), as of the last read. */
   readonly linkedPersonId: string | null
+  /**
+   * This device had chosen a person and that person no longer exists (PROMPT-14 Part 5). After a
+   * restore that could not re-link by name, this is how the boot sequence knows to ASK rather than
+   * let `assemble` fall back to people[0].
+   */
+  readonly staleChoice: boolean
 }
 
 export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): PowerSyncLedgerStore {
@@ -154,6 +221,7 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
   let importMap: Map<string, string> | null = null // the last import's old → new ids
   let nextDeliveryWholesale = false
   const linkedTo = new Map<string, string>() // person id → linked_user_id, as the database holds it
+  let staleChoice = false // a choice is stored on this device and that person is gone (Part 5)
   const knownLists = new WeakSet<object>() // every list the store has delivered, loaded or saved (isImport)
   const deliveries = new WeakSet<AppDataV2>() // every dataset the store handed out
   const remember = (d: AppDataV2) => {
@@ -209,6 +277,7 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     const ids = new Set(base.people.map((p) => p.id))
     const choice = readChoice()
     const linked = (rows.people ?? []).find((r) => r.linked_user_id === userId)?.id
+    staleChoice = choice !== null && !ids.has(choice)
     const primaryPersonId = choice && ids.has(choice) ? choice : linked && ids.has(linked) ? linked : (base.people[0]?.id ?? '')
     return migrateLedgerData({ ...base, primaryPersonId })
   }
@@ -257,6 +326,9 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     get linkedPersonId() {
       return [...linkedTo].find(([, uid]) => uid === userId)?.[0] ?? null
     },
+    get staleChoice() {
+      return staleChoice
+    },
 
     async load() {
       await gate
@@ -302,8 +374,21 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
           target = applyIdMap(next, importMap)
         }
         if (target.primaryPersonId !== shadow.primaryPersonId && target.primaryPersonId) writeChoice(target.primaryPersonId)
+        // linkOps mutates linkedTo, so take the database's view first.
+        const linkedBeforeImport = new Map(linkedTo)
         const link = linkOps(shadow, target, imported)
-        const ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last]
+        // Part 5: an import kills every other member's link, because their row
+        // is deleted and reborn. Carry each one across by name, in the same
+        // narrow one-column shape, AFTER the diff has done the deleting (the
+        // (household, linked_user_id) unique index).
+        const relink = imported ? relinkOps(linkedBeforeImport, shadow, target, userId, link.last[0]?.kind === 'update' ? link.last[0].id : null) : { ops: [] as LinkUpdate[], unresolved: [] as string[] }
+        if (relink.unresolved.length > 0) {
+          log.warn(
+            `[powersync] restore: ${relink.unresolved.length} household member(s) could not be re-linked by name — their device will ask which person they are (PROMPT-14 Part 5)`,
+          )
+        }
+        for (const op of relink.ops) linkedTo.set(op.id, op.set.linked_user_id)
+        const ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last, ...relink.ops]
         for (const op of ops) {
           if (op.kind === 'insert') (present.get(op.table) ?? present.set(op.table, new Set()).get(op.table)!).add(op.row.id)
           if (op.kind === 'delete') present.get(op.table)?.delete(op.id)
