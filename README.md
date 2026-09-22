@@ -151,3 +151,19 @@ Built here first, then ported to both live apps.
   stale, so after changing anything in `src/lib` the alert path can reach, run the build script.
   That is the one thing standing between "the 8pm alert is the app's own engine" and "the 8pm alert
   is whatever was bundled in September".
+
+
+## What each button does — and which live app each site stands in for
+
+The two deployed sites behave as the two live apps do, so the button guides live in **their**
+READMEs rather than being written a third time here:
+
+| This site | Behaves as | Backup & Restore is | Read |
+|---|---|---|---|
+| `adamnc02.github.io/finance-ledger-test/` (root, offline) | `personal-ledger` | on the **Wallet** page, two round buttons | [`personal-ledger/README.md` → What each button does](https://github.com/adamnc02/personal-ledger#what-each-button-does) |
+| `adamnc02.github.io/finance-ledger-test/sync/` | `shared-finance-ledger` | in the **Account** modal only | [`shared-finance-ledger/README.md` → What each button does](https://github.com/adamnc02/shared-finance-ledger#what-each-button-does) |
+
+🚨 **On `/sync/` the Wallet page has no Backup card at all** — not an empty one. `WalletBackupSlot`
+renders `null` under the `'account'` provider, so there is no card, no heading and no gap. That is
+the mechanism working, not a missing component: `verify-backup-placement.ts` asserts the rendered
+output is the empty string.
