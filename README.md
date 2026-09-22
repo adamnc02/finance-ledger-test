@@ -132,3 +132,22 @@ in `src/lib/`.
 - The what-if scenario UI is functional but basic — no visual chart of the
   before/after loan schedule yet, just the numbers.
 - Tax year constants are for 2026/27 only; there's no year-picker.
+
+## PROMPT-14 (2026-09-22) — Backup & Restore, and low-balance alerts
+
+Built here first, then ported to both live apps.
+
+- **Parts 1–6** reach all three apps. `src/components/BackupSection.tsx` is a shared, sync-free
+  component behind a placement slot: it renders on the Wallet page by default, and renders nothing
+  when an app provides `BackupPlacementContext = 'account'`. **The root (offline) build shows the
+  Wallet card; `/sync/` shows Backup & Restore in the Account modal instead** — the difference is
+  which build renders a provider, not which build compiles a file, so `Salary.tsx` stays identical
+  everywhere.
+- **Part 7 is `/sync/` only.** Low-balance alerts need a server; the root build has none.
+  `public/sw.js`, `src/lib/powersync/push.ts` and the Account modal's toggle only do anything there.
+- 🚨 **`scripts/build-alert-engine.ts` writes a file in the OTHER repo** —
+  `silver-octo-invention/supabase/functions/ledger-alerts/_engine.js`, the Edge Function's bundled
+  copy of this app's projection engine. `verify-alert-engine-bundle.ts` fails the sweep when it is
+  stale, so after changing anything in `src/lib` the alert path can reach, run the build script.
+  That is the one thing standing between "the 8pm alert is the app's own engine" and "the 8pm alert
+  is whatever was bundled in September".
