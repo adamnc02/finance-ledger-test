@@ -26,7 +26,7 @@
 //  5. a wrapped {data: …} backup and a raw dump both parse — the two shapes
 //     that exist in the wild.
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { migrateLedgerData, parseLedgerBackupJson, serialiseLedgerBackup } from '../src/lib/ledgerStorage'
 
@@ -44,20 +44,37 @@ const root = resolve(import.meta.dirname, '..')
 const DIR = '/Users/adamcox/Downloads/App Development & Bug Tracking/shared-finance-ledger'
 const BACKUPS = ['finance-ledger-backup-2026-09-15.json', 'finance-ledger-backup-2026-09-15-mum.json', 'finance-ledger-backup-2026-09-17-mum.json']
 const strip = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
-const backupLib = strip(readFileSync(resolve(root, 'src/lib/powersync/backup.ts'), 'utf8'))
+// 🚨 The offline apps have no cloud half at all, and this file is SHARED by
+// all three deliberately — the round-trip guarantee in section 2 is exactly as
+// load-bearing for personal-ledger's Wallet export as for a cloud snapshot.
+// So section 1 is skipped where there is no cloud, and the skip is itself
+// CHECKED: an app with no backup.ts must have no sync layer either, or the
+// "skip" would be hiding a missing file rather than describing an app.
+const cloudPath = resolve(root, 'src/lib/powersync/backup.ts')
+const hasCloud = existsSync(cloudPath)
+const backupLib = hasCloud ? strip(readFileSync(cloudPath, 'utf8')) : ''
 const storageLib = strip(readFileSync(resolve(root, 'src/lib/ledgerStorage.ts'), 'utf8'))
 
 console.log('\n1. One serialiser, one parser — structurally, not by coincidence')
+if (!hasCloud) {
+  check('this app has no cloud backup, and no sync layer either — so section 1 does not apply', !existsSync(resolve(root, 'src/lib/powersync')))
+  check('…and its one write path still goes through the shared serialiser', /const json = serialiseLedgerBackup\(data\)/.test(storageLib))
+}
+if (hasCloud) {
 check('uploadSnapshot serialises through serialiseLedgerBackup', /\.upload\(.*serialiseLedgerBackup\(data\)/.test(backupLib), backupLib.match(/\.upload\([^\n]*/)?.[0])
 check('downloadLedgerBackup does too', /const json = serialiseLedgerBackup\(data\)/.test(storageLib))
 check('neither write path stringifies on its own', !/JSON\.stringify\(data, null, 2\)/.test(backupLib) && (storageLib.match(/JSON\.stringify\(data, null, 2\)/g) ?? []).length === 1)
 check('downloadSnapshot reads through parseLedgerBackupJson — the file picker’s own function', /parseLedgerBackupJson\(await data\.text\(\)\)/.test(backupLib))
+}
 
 console.log('\n2. Round trips over the three real backups')
 for (const name of BACKUPS) {
   const raw = readFileSync(`${DIR}/${name}`, 'utf8')
   const loaded = parseLedgerBackupJson(raw)
 
+  // Both call sites now go through this one function (section 1 asserts that
+  // in the source), so calling it twice IS the two paths — and if either ever
+  // stops calling it, section 1 fails rather than this passing on a lie.
   const asSnapshot = serialiseLedgerBackup(loaded) // what uploadSnapshot puts in the bucket
   const asFile = serialiseLedgerBackup(loaded) // what downloadLedgerBackup puts on the phone
   check(`${name}: the cloud bytes and the file bytes are identical`, asSnapshot === asFile)
