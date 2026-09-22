@@ -152,6 +152,29 @@ Built here first, then ported to both live apps.
   That is the one thing standing between "the 8pm alert is the app's own engine" and "the 8pm alert
   is whatever was bundled in September".
 
+### 🚨 What the first real alert run taught (2026-09-22)
+
+Both of these were found live, with the 20:00 gate lifted for UAT, and both killed the whole run
+before a notification was sent. They matter here because the fix is in code this repo owns.
+
+- **A jsonb column reaches `fromRows` in two shapes.** SQLite has no json type, so PowerSync
+  returns jsonb as **TEXT**; **PostgREST returns it already PARSED**. The app reads the local
+  database, the Edge Function reads the server, and **both call the same `mapping.ts`** — which is
+  the whole point of having one engine, and is also what puts two wire formats through one parser.
+  `j()` handles both (and a third, double-encoded state); `Value` admits an object for that reason.
+  Narrowing it back to `JSON.parse(String(v))` gives `JSON.parse("[object Object]")`.
+- **`service_role` had no access to the schema at all** (`42501`), because Supabase grants it
+  `public` and a custom schema gets nothing. Fixed in the Supabase repo by `20260922200000`.
+
+🚨 **The testing lesson, which is the part worth keeping.** `verify-alert-engine-bundle.ts` fed the
+engine rows built by this app's own `toRows()` — app-shaped, jsonb as canonical text — so it had
+never once seen a PostgREST response. And all three real backups have **empty** histories, so `j()`
+returned at its `if (v === '')` guard and never reached the broken line. Every assertion passed
+while exercising nothing. **A check fed by the writer cannot find a wire-format bug, and a check
+over fixtures must assert it was not vacuous** — §5 now builds the PostgREST shape explicitly,
+counts the jsonb columns it actually parsed, and carries a control proving the old expression
+throws on that exact value.
+
 
 ## What each button does — and which live app each site stands in for
 
