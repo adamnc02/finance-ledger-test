@@ -152,6 +152,25 @@ Built here first, then ported to both live apps.
   That is the one thing standing between "the 8pm alert is the app's own engine" and "the 8pm alert
   is whatever was bundled in September".
 
+### 🚨 The alert window starts TOMORROW (2026-09-22)
+
+Adam, after a live alert: *"ignore today, look from tomorrow and report the first dip."* An alert
+sent at 20:00 is a heads-up about what is coming; today has happened.
+
+🚨 **The SEARCH is narrowed, not the walk.** The balance series is still built over the whole
+cycle, so tomorrow's day-end carries the opening balance and every payment already gone out — only
+`findShortfalls` filters which days it looks at. Rebuilding the series from tomorrow would drop
+that history and call an account healthy because its past vanished.
+
+What it changed, on real data: an account reported as *"£15.27 short on 22 September"* now reports
+*"£115.96 short on 23 September"*, because a £100 transfer out lands tomorrow. Also gone: the past
+tense (*"You've been … since"*), since the reported day can no longer be in the past.
+
+And **money arriving before the dip is now named** — *"…leaves you £31.66 short, despite £100.00
+due in on 23 September. Nothing else due in before 29 September."* It was invisible before, so the
+alert ended "Nothing more due in", which read as "nothing is coming" when £100 had come and wasn't
+enough.
+
 ### 🚨 What the first real alert run taught (2026-09-22)
 
 Both of these were found live, with the 20:00 gate lifted for UAT, and both killed the whole run
