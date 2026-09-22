@@ -50,6 +50,14 @@
 // store — nothing is written or delivered again — and onHouseholdLost()
 // tells the boot sequence to clear the local copy and start over.
 //
+// A RE-IMPORT OF THIS HOUSEHOLD'S OWN FILE IS A PATCH (PROMPT-14 Part 4).
+// If any id in the incoming data is one this store already holds, the file
+// came from here and was edited, so the ids are kept and diffRows writes only
+// what actually changed — the workflow behind "export, edit the JSON,
+// re-import" (APP-KNOWLEDGE). Everything else below still applies to a
+// genuinely foreign file. isSameHouseholdPatch names the two id classes that
+// must NOT count as evidence.
+//
 // IMPORTS GET FRESH IDS (PROMPT-10 Part 3, MIGRATION-LESSONS §31). A save
 // whose lists are ALL new to the store (setData with parsed JSON: Wallet →
 // Backup's restore, a cloud restore, the empty-household import; see
@@ -76,7 +84,7 @@ import { migrateLedgerData } from '../ledgerStorage'
 import type { LedgerStore } from './LedgerStore'
 import { fromRows, toRows, type Rows } from '../powersync/mapping'
 import { diffRows, type Op, type Positions } from '../powersync/writes'
-import { applyIdMap, regenerateIds } from '../powersync/importIds'
+import { applyIdMap, FIXED_CATEGORY_IDS, regenerateIds } from '../powersync/importIds'
 
 /** Every list in AppDataV2. */
 const LISTS = [
@@ -92,6 +100,70 @@ const LISTS = [
  */
 export function isImport(next: AppDataV2, known: WeakSet<object>): boolean {
   return LISTS.every((k) => !known.has(next[k]))
+}
+
+/**
+ * PROMPT-14 Part 4 — is this file a PATCH of the data this store already holds, rather than a
+ * foreign import?
+ *
+ * `isImport` regenerates ids because two households importing one backup would collide (§31). But
+ * a file exported from THIS household and hand-edited is not a foreign import — it is a patch of
+ * rows the store already has. Paying the full price for it means every row deleted and reinserted,
+ * Part 5's re-link, and a wholesale delivery, to change one number.
+ *
+ * So: if ANY id in the incoming data is one the store currently holds, it is a patch. Skip
+ * `regenerateIds` and let `diffRows` do its ordinary narrow work — one field edited, one column
+ * written, and Ella sees one narrow update.
+ *
+ * 🚨 TWO ID CLASSES MUST BE EXCLUDED, and forgetting either makes this return true for a genuinely
+ * foreign backup — which is the 23505-and-silently-discarded failure §31 exists to prevent:
+ *
+ *   - **the 35 fixed category ids.** `regenerateIds` deliberately KEEPS them, so every household
+ *     on earth has the same ones. They prove nothing about provenance.
+ *   - **`auto:` and `sort:` ids.** They are DERIVED from the ids inside them, so if one matches,
+ *     the person or source id inside it matches too and is already doing the work. Excluding them
+ *     costs nothing and removes a whole class of false positives.
+ *
+ * After `erase_my_data()` nothing matches, so it correctly falls back to a full import.
+ */
+export function isSameHouseholdPatch(next: AppDataV2, shadow: AppDataV2): boolean {
+  const own = new Set<string>()
+  collectOwnIds(shadow, own)
+  const incoming = new Set<string>()
+  collectOwnIds(next, incoming)
+  for (const id of incoming) if (own.has(id)) return true
+  return false
+}
+
+/**
+ * How many rows this household currently holds that the incoming file does NOT — the rows a patch
+ * will DELETE.
+ *
+ * 🚨 The foot-gun this exists for: a hand-trimmed backup with rows removed still reads as a patch,
+ * and the diff does exactly what it is told. So the confirm says how many rows will be deleted, not
+ * only how many are being replaced (PROMPT-14 Part 4, guard rails).
+ */
+export function rowsRemovedByPatch(next: AppDataV2, shadow: AppDataV2): number {
+  const incoming = new Set<string>()
+  collectOwnIds(next, incoming)
+  const own = new Set<string>()
+  collectOwnIds(shadow, own)
+  let removed = 0
+  for (const id of own) if (!incoming.has(id)) removed++
+  return removed
+}
+
+/** Every id in the data that actually identifies THIS household's rows (see the exclusions above). */
+function collectOwnIds(data: AppDataV2, out: Set<string>) {
+  for (const list of LISTS) {
+    for (const row of data[list] as ReadonlyArray<{ id?: unknown }>) {
+      const id = row?.id
+      if (typeof id !== 'string' || !id) continue
+      if (FIXED_CATEGORY_IDS.has(id)) continue
+      if (id.startsWith('auto:') || id.startsWith('sort:')) continue
+      out.add(id)
+    }
+  }
 }
 
 /** The one op shape "Set as me" and Part 5's re-link both write: one column, one row. */
@@ -363,13 +435,23 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
       }
       try {
         let target = next
-        const imported = isImport(next, knownLists)
+        const setDataCall = isImport(next, knownLists)
+        // Part 4: setData with a file this household exported is a PATCH, not
+        // a foreign import. Same code path, minus the id churn.
+        const patch = setDataCall && isSameHouseholdPatch(next, shadow)
+        const imported = setDataCall && !patch
         if (imported) {
           const fresh = regenerateIds(next)
           target = fresh.data
           importMap = fresh.map
           nextDeliveryWholesale = true
           log.info(`[powersync] import: ${fresh.map.size} ids regenerated (the 35 fixed categories kept)`)
+        } else if (patch) {
+          // No remap: the file already carries this household's own ids, which
+          // is exactly what makes it a patch. Still wholesale, because whole
+          // lists were replaced and pages must resync (APP-KNOWLEDGE §1.6).
+          nextDeliveryWholesale = true
+          log.info('[powersync] re-import of this household\'s own file: patched, ids kept (PROMPT-14 Part 4)')
         } else if (importMap) {
           target = applyIdMap(next, importMap)
         }

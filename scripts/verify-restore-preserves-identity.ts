@@ -29,10 +29,12 @@
 //  5. the ops are NARROW: one linked_user_id column, one row each — never a
 //     whole-row rewrite (DECISIONS Q2: PowerSync's per-column conflict
 //     resolution rests on it);
-//  6. ambiguity is never guessed: two incoming people with the same name, or
+//  6. a patch of this household's own file (Part 4) needs no re-link at all,
+//     because nothing was unlinked;
+//  7. ambiguity is never guessed: two incoming people with the same name, or
 //     no match at all, leave that member unlinked and set staleChoice, which
 //     is what makes their device ASK (§0 Q4b) instead of choosing for them;
-//  7. an unchanged name that differs only in case or spacing still re-links —
+//  8. an unchanged name that differs only in case or spacing still re-links —
 //     a restore of a hand-edited file is exactly where "Ella" becomes "ella".
 
 import { readFileSync } from 'node:fs'
@@ -96,7 +98,14 @@ async function deviceView(db: FakeSyncDb, userId: string, choice: string | null)
   }
 }
 
-const before = parseLedgerBackupJson(raw)
+// 🚨 What the household holds now is deliberately NOT the file being restored.
+// Since Part 4, re-importing this household's OWN file is a patch: ids are
+// kept, so nobody's link is touched and Part 5 has nothing to do. The restore
+// that still needs Part 5 is a genuine import — an older snapshot taken before
+// an erase, a file from another device's household, anything whose ids this
+// household does not hold. So the household below is a regenerated copy, and
+// the backup file keeps the original ids: no overlap, a real import.
+const before = regenerateIds(parseLedgerBackupJson(raw)).data
 const ellaBefore = personNamed(before, 'Ella')
 const adamBefore = personNamed(before, 'Adam')
 
@@ -170,7 +179,25 @@ console.log('\n3. A file restore does the same (both routes converge, Part 3)')
   check("Ella's device still lands on Ella", ella.data.people.find((p) => p.id === ella.data.primaryPersonId)!.name === 'Ella')
 }
 
-console.log('\n4. Ambiguity is never guessed (§0 Q4b)')
+console.log("\n4. A patch of this household's own file needs no re-link at all (Part 4)")
+{
+  const db = seededDb(before)
+  const sync = deferred()
+  const storage = memoryStorage()
+  storage.setItem('k', adamBefore.id)
+  const store = createPowerSyncLedgerStore({ db, householdId: HH, userId: ADAM_USER, firstSync: sync.promise, storageKey: 'k', storage, log: silent })
+  sync.resolve()
+  const loaded = await store.load()
+  db.clearLog()
+  store.save(JSON.parse(JSON.stringify(loaded)) as AppDataV2, loaded!) // the household's own file, re-imported unchanged
+  await store.flush()
+  await tick(10)
+  check('no link op at all: nothing was unlinked, so nothing needs re-linking', db.log.filter((s) => s.columns.includes('linked_user_id')).length === 0, db.log.slice(0, 5))
+  const ella = await deviceView(db, ELLA_USER, personNamed(before, 'Ella').id)
+  check("Ella's device is untouched", ella.data.people.find((p) => p.id === ella.data.primaryPersonId)!.name === 'Ella')
+}
+
+console.log('\n5. Ambiguity is never guessed (§0 Q4b)')
 {
   const linked = new Map([[ellaBefore.id, ELLA_USER]])
   const twoSams: AppDataV2 = { ...before, people: [{ ...adamBefore, name: 'Sam' }, { ...ellaBefore, id: 'new-ella', name: 'Sam' }] }

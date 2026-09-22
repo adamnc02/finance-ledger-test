@@ -12,7 +12,7 @@
 // (DECISIONS Q9): never offered at sign-in.
 
 import type { AppDataV2 } from '../../types/ledger'
-import { parseLedgerBackupJson } from '../ledgerStorage'
+import { parseLedgerBackupJson, serialiseLedgerBackup } from '../ledgerStorage'
 import { toLocalIsoDate } from '../date'
 import { supabase } from '../supabaseClient'
 
@@ -31,7 +31,7 @@ const today = () => toLocalIsoDate(new Date())
 export async function uploadSnapshot(userId: string, data: AppDataV2): Promise<void> {
   const { error } = await supabase.storage
     .from(BACKUP_BUCKET)
-    .upload(`${userId}/${today()}.json`, JSON.stringify(data, null, 2), { contentType: 'application/json', upsert: true })
+    .upload(`${userId}/${today()}.json`, serialiseLedgerBackup(data), { contentType: 'application/json', upsert: true })
   if (error) throw error
 }
 

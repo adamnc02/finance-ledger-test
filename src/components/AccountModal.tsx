@@ -48,6 +48,7 @@ import { duplicatePersonKey, getLinkCode, justJoinedKey, redeemLinkCode, regener
 import { legacyOfferedKey } from '../lib/powersync/legacyData'
 import { describeBackupContents } from './BackupSection'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
+import { isSameHouseholdPatch, rowsRemovedByPatch } from '../lib/store/powerSyncLedgerStore'
 import { useSyncControls } from './syncControls'
 
 /** personal-f / BLOC: an absent provider IS the email/password signal. */
@@ -479,6 +480,7 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
         <ConfirmSheet
           confirm={confirm}
           replacing={ledger ? describeBackupContents(ledger.data) : null}
+          current={ledger?.data ?? null}
           onCancel={() => setConfirm(null)}
           onDelete1={() => setConfirm({ kind: 'delete2' })}
           onGo={() => {
@@ -556,8 +558,13 @@ const CONFIRM_TEXT: Record<Confirm['kind'], { title: string; body: string; go: s
   },
 }
 
-function ConfirmSheet({ confirm, replacing, onCancel, onDelete1, onGo }: { confirm: Confirm; replacing: string | null; onCancel: () => void; onDelete1: () => void; onGo: () => void }) {
+function ConfirmSheet({ confirm, replacing, current, onCancel, onDelete1, onGo }: { confirm: Confirm; replacing: string | null; current: AppDataV2 | null; onCancel: () => void; onDelete1: () => void; onGo: () => void }) {
   const t = CONFIRM_TEXT[confirm.kind]
+  // A file this household exported and someone edited is a PATCH: only what
+  // changed is written (Part 4). Say so — and say what it will DELETE, because
+  // a hand-trimmed file reads as a patch too and the diff does as it is told.
+  const patch = confirm.kind === 'restore' && confirm.source.kind === 'file' && current && isSameHouseholdPatch(confirm.source.data, current)
+  const removing = patch && current && confirm.kind === 'restore' && confirm.source.kind === 'file' ? rowsRemovedByPatch(confirm.source.data, current) : 0
   return (
     <div className="fixed inset-0 z-[10003] flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={(e) => (e.stopPropagation(), onCancel())}>
       <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: 'var(--color-surface)' }} onClick={(e) => e.stopPropagation()}>
@@ -576,6 +583,12 @@ function ConfirmSheet({ confirm, replacing, onCancel, onDelete1, onGo }: { confi
               <p className="text-xs text-[var(--color-ink-muted)] mb-2">
                 Replacing {replacing}
                 {confirm.source.kind === 'file' ? ` with ${describeBackupContents(confirm.source.data)}` : ''}.
+              </p>
+            )}
+            {patch && (
+              <p className="text-xs text-[var(--color-positive)] mb-2">
+                This is this household's own file, so only what you changed is written — no ids change and nobody has to say who they are again.
+                {removing > 0 ? ` ${removing} row${removing === 1 ? '' : 's'} in the app ${removing === 1 ? 'is' : 'are'} missing from this file and will be DELETED.` : ''}
               </p>
             )}
           </>
