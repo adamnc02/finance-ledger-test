@@ -45,7 +45,7 @@ import { computePotProjection } from './potLedger'
 import { potSignedAmount } from './potLedger'
 import { computeJointAccountProjection, jointAccountSignedAmount } from './jointAccountLedger'
 import { buildDailyBalanceSeries, daysBetweenInclusive, isLedgerTransaction, signedAmount } from './runningBalance'
-import { toLocalIsoDate as toIso } from './date'
+import { parseLocalDate, toLocalIsoDate as toIso } from './date'
 import { formatDayMonth } from './format'
 import type { AppDataV2, Transaction } from '../types/ledger'
 
@@ -380,16 +380,60 @@ function possessive(account: WatchedAccount): string {
 }
 
 /**
+ * Has this account's CLEARED balance reached £0 or above at any point since `sinceIso`?
+ *
+ * 🚨 This is the whole of PROMPT-15's Sunday suppression (§0 Q8). Adam: *"if a user was in
+ * overdraft at the last notification, and they haven't come out of it since last week, then the
+ * notification should not fire the second week."* It makes the heads-up **self-clearing**: quiet
+ * for someone who lives in their overdraft, talking again the moment their situation changes.
+ *
+ * It asks about the **cleared** balance — what actually happened — not about the projection. The
+ * alert asks a question about a forecast, but *"have you been in your overdraft all week?"* is a
+ * question about reality, and answering it from the alert's own prior output would be circular.
+ *
+ * 🚨 The known quirk, accepted knowingly (§0 Q8): paid in and straight back out on the same day
+ * counts as having come out. That is the safe direction — it errs towards telling you.
+ *
+ * 🚨 When it cannot tell, it returns TRUE (= came out = do not suppress). Silence is the failure
+ * that matters here; a duplicate heads-up is not.
+ *
+ * It reuses `accountCycle`'s transaction list rather than re-deriving which rows belong to this
+ * account — that scoping exists once, and a second copy would drift. `buildDailyBalanceSeries`
+ * folds from the opening balance regardless of which days are reported, so a window starting at
+ * `sinceIso` still counts everything before it.
+ */
+export function cameOutOfOverdraftSince(data: AppDataV2, account: WatchedAccount, sinceIso: string, asOfDate: Date): boolean {
+  const c = accountCycle(data, account, asOfDate)
+  if (!c) return true
+  const todayIso = toIso(asOfDate)
+  if (sinceIso >= todayIso) return false // told today; nothing has had time to change
+  const days = daysBetweenInclusive(parseLocalDate(sinceIso), asOfDate)
+  const series = buildDailyBalanceSeries(c.openingBalance, c.transactions, days, c.sign, c.include)
+  return series.some((p) => p.date > sinceIso && p.clearedBalance >= 0)
+}
+
+/** Sunday, in London. The overdraft heads-up fires weekly; the out-of-money alert is nightly (§0 Q7). */
+export function isSunday(londonDate: string): boolean {
+  // Noon UTC so no offset can move it across midnight.
+  return new Date(`${londonDate}T12:00:00Z`).getUTCDay() === 0
+}
+
+/**
  * The dedupe key a shortfall claims before anything is sent.
  *
  * 🚨 THE DATE IS LOAD-BEARING. Listly's keys are event-shaped and carry no date, and they are the
  * worked example being copied — so leaving it out here is the likely mistake. Without it the alert
  * fires once and never again, which kills §0b Q4's "every evening until it clears" outright.
  *
- * `londonDate` is the date in Europe/London, not UTC: at 20:00 BST it is already the next day in
- * neither, but in December a 20:00 London run is 20:00 UTC and in June it is 19:00 UTC, and a key
- * built from the UTC date would change day at the wrong moment.
+ * 🚨 THE SEVERITY IS LOAD-BEARING TOO, and for a different reason (PROMPT-15 §0 Q7). It is NOT
+ * needed for deduping — the date already does that. It is needed so the Sunday suppression can
+ * find *the last **overdraft** alert for this account*, which it cannot if both severities share a
+ * key shape. I ruled this out once as machinery for an impossible case; the suppression made it
+ * necessary.
+ *
+ * `londonDate` is the date in Europe/London, not UTC: a key built from the UTC date would change
+ * day at the wrong moment for half the year.
  */
 export function shortfallDedupeKey(shortfall: Shortfall, personId: string, londonDate: string): string {
-  return `shortfall:${shortfall.account.kind}:${shortfall.account.id}:${personId}:${londonDate}`
+  return `shortfall:${shortfall.severity}:${shortfall.account.kind}:${shortfall.account.id}:${personId}:${londonDate}`
 }
