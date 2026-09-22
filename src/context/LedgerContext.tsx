@@ -1141,7 +1141,12 @@ function LedgerDataProvider({ children, store, initialData }: { children: ReactN
   }
 
   const setJointAccountOpening: LedgerContextValue['setJointAccountOpening'] = (openingBalance, openingBalanceDate) => {
-    setDataState((prev) => ({ ...prev, jointAccount: { openingBalance, openingBalanceDate } }))
+    setDataState((prev) => ({
+      ...prev,
+      // The overdraft survives a re-setup of the opening balance: it is a fact
+      // about the account, not about the reconciliation point.
+      jointAccount: { openingBalance, openingBalanceDate, overdraftAmount: prev.jointAccount?.overdraftAmount ?? 0 },
+    }))
   }
 
   // SUPERSEDED (2026-09-04 session) — thin wrapper over logTransfer. The
@@ -1196,6 +1201,9 @@ function LedgerDataProvider({ children, store, initialData }: { children: ReactN
         openingDate: effectiveFrom,
         active: true,
         color: pickNextSharedCardColor(prev),
+        // A Coin Jar never gets an overdraft: its field is hidden on the form
+        // and it is not watched for shortfalls at all (PROMPT-15 §0 Q4).
+        overdraftAmount: 0,
         isCoinJar: true,
       }
       return { ...prev, payCycles, pots: [...prev.pots, jar] }

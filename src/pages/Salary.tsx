@@ -3446,6 +3446,7 @@ export function Salary() {
               salarySortBasis={payCycle?.salarySortBasis ?? 'payday'}
               openingBalance={payCycle?.openingBalance ?? 0}
               openingBalanceDate={payCycle?.openingBalanceDate ?? todayIso()}
+              overdraftAmount={payCycle?.overdraftAmount ?? 0}
               roundUpEnabled={payCycle?.roundUpEnabled ?? false}
               hasCoinJar={data.pots.some((p) => p.isCoinJar && p.personId === person.id)}
               onChangeRoundUp={(enabled, effectiveFrom) => setRoundUp(person.id, enabled, effectiveFrom)}
@@ -3948,6 +3949,10 @@ function SalarySetupForm({
               paySchedule: isFourWeekly ? { kind: payFrequency, anchorPayDate: nextPayDate } : undefined,
               cycleStartDayOfMonth: Number(cycleStartDayOfMonth),
               cycleStartFollowsPayday,
+              // Set later, in the cog (PayCycleSettingsModal), not during
+              // first-time salary setup — nobody is thinking about their
+              // overdraft while typing their salary in.
+              overdraftAmount: payCycle?.overdraftAmount ?? 0,
               openingBalance: Number(openingBalance),
               openingBalanceDate,
             },
@@ -3974,6 +3979,7 @@ function PayCycleSettingsModal({
   salarySortBasis,
   openingBalance,
   openingBalanceDate,
+  overdraftAmount,
   roundUpEnabled,
   hasCoinJar,
   onChangeRoundUp,
@@ -3998,6 +4004,8 @@ function PayCycleSettingsModal({
   salarySortBasis: 'payday' | 'budget_cycle'
   openingBalance: number
   openingBalanceDate: string
+  /** PROMPT-15 — how far below zero this account may go; 0 means no overdraft. Read only by the low-balance alert. */
+  overdraftAmount: number
   /**
    * PROMPT-13 B4 — whether round-ups are currently on for this person, and
    * the flow that changes it.
@@ -4024,6 +4032,7 @@ function PayCycleSettingsModal({
     salarySortBasis: 'payday' | 'budget_cycle'
     openingBalance: number
     openingBalanceDate: string
+    overdraftAmount: number
   }) => void
   onDeleteSalary: () => void
   onClose: () => void
@@ -4052,6 +4061,7 @@ function PayCycleSettingsModal({
   const [draftSalarySortBasis, setDraftSalarySortBasis] = useState<'payday' | 'budget_cycle'>(salarySortBasis)
   const [draftOpeningBalance, setDraftOpeningBalance] = useState(String(openingBalance))
   const [draftOpeningBalanceDate, setDraftOpeningBalanceDate] = useState(openingBalanceDate)
+  const [draftOverdraft, setDraftOverdraft] = useState(String(overdraftAmount || ''))
   const [draftRoundUp, setDraftRoundUp] = useState(roundUpEnabled)
   // PROMPT-13 B4 — set while a round-up switch waits for its
   // effective-from date. Kept separate from `choosingPaydayFrom` so the
@@ -4070,6 +4080,7 @@ function PayCycleSettingsModal({
     draftSalarySortBasis !== salarySortBasis ||
     (Number(draftOpeningBalance) || 0) !== openingBalance ||
     draftOpeningBalanceDate !== openingBalanceDate ||
+    (Number(draftOverdraft) || 0) !== overdraftAmount ||
     draftRoundUp !== roundUpEnabled
 
   const paydayChanged = draftPayday !== payday || draftAdjust !== adjustForNonWorkingDay || (paySchedule !== undefined && draftNextPayDate !== (nextPayday ?? ''))
@@ -4113,6 +4124,10 @@ function PayCycleSettingsModal({
       salarySortBasis: draftSalarySortBasis,
       openingBalance: Number(draftOpeningBalance) || 0,
       openingBalanceDate: draftOpeningBalanceDate,
+      // Never negative: NumberInput has no allowNegative here, and this is
+      // the belt to that pair of braces. A negative would invert the alert's
+      // floor to +£500 and fire on a healthy account (PROMPT-15 §0 Q2).
+      overdraftAmount: Math.max(0, Number(draftOverdraft) || 0),
     })
   }
 
@@ -4237,7 +4252,23 @@ function PayCycleSettingsModal({
               className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none"
             />
           </Field>
+          <Field label="Overdraft (£)">
+            {/* PROMPT-15 — how far below zero this account may go. 0 = none.
+                🚨 NO `allowNegative`, deliberately the opposite of the
+                opening balance above and for the opposite reason: an
+                opening balance legitimately takes a minus (the account is
+                overdrawn), whereas a NEGATIVE overdraft would invert the
+                alert's floor to +£500 and fire on a healthy account. */}
+            <NumberInput
+              value={draftOverdraft}
+              onChange={setDraftOverdraft}
+              className="w-full bg-transparent border-b border-[var(--color-track)] py-1 text-[var(--color-ink)] outline-none font-mono"
+            />
+          </Field>
         </div>
+        <p className="text-[11px] text-[var(--color-ink-faint)] mt-1.5">
+          How far below zero this account may go. Leave at 0 if it cannot. Only the 8pm low-balance alert reads it.
+        </p>
         <label className="flex items-center gap-2 mt-3">
           <input type="checkbox" checked={draftAdjust} onChange={(e) => setDraftAdjust(e.target.checked)} />
           <span className="text-xs text-[var(--color-ink-muted)]">

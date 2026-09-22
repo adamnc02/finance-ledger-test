@@ -65,13 +65,51 @@ export interface WatchedAccount {
   personIds: string[]
   /** Which person's pay cycle bounds this account is measured against (pots and joint borrow one). */
   cyclePersonId: string
+  /**
+   * How far below zero this account may go. `0` = no overdraft (PROMPT-15 §0 Q2). Always positive.
+   *
+   * 🚨 It creates a SECOND floor, and the two mean different things in English — see `Severity`.
+   */
+  overdraftAmount: number
 }
+
+/**
+ * 🚨 THE TWO SITUATIONS ARE NOT THE SAME THING, and the difference is not one of degree.
+ *
+ * Adam, 2026-09-22: *"I can't go below zero or below my overdraft limit, so going 712 into a 500
+ * overdraft makes no sense, same for below 0."*
+ *
+ * A balance **cannot pass its floor** — the bank declines the payment. So:
+ *
+ * - `'overdraft'` describes a state that **really happens**: you dip into a buffer you are allowed
+ *   to use. The amount is **how far below zero** you go.
+ * - `'shortfall'` describes a state that **cannot happen**: the payment does not go through. The
+ *   amount is **how much you are SHORT BY** — how much more money is needed for it to clear.
+ *
+ * Never describe a balance beyond its floor. "£712.40 into your £500 overdraft" and, with no
+ * overdraft, "£212.40 below zero", are both impossible states.
+ */
+export type Severity = 'overdraft' | 'shortfall'
 
 export interface Shortfall {
   account: WatchedAccount
-  /** The FIRST day in the cycle the projected running balance is below zero. */
+  /** Which of the two situations this is — see `Severity`. They take different numbers. */
+  severity: Severity
+  /**
+   * The FIRST day in the cycle the projected running balance passes this severity's floor.
+   *
+   * 🚨 It can be in the PAST. The walk starts at the cycle start, not today, and the first dip is
+   * load-bearing: it is what seeds PROMPT-15's suppression history (Adam, 2026-09-22 — *"get the
+   * first notification, as this sets the history check for the 2nd notification"*). `isPast` is
+   * what the message branches on.
+   */
   date: string
-  /** How far below zero it goes on that day, as a positive number of pounds. */
+  /** True when `date` has already happened, so the message reads in the past tense. */
+  isPast: boolean
+  /**
+   * A positive number of pounds, meaning **different things** by severity:
+   * `'overdraft'` → how far below zero you go. `'shortfall'` → how much you are SHORT BY.
+   */
   amount: number
   cycleStart: string
   cycleEnd: string
@@ -114,13 +152,14 @@ export function watchedAccounts(data: AppDataV2): WatchedAccount[] {
   // everyone, since ledgerStorage defaults one per person.
   for (const person of data.people) {
     if (!data.payCycles.some((c) => c.personId === person.id)) continue
-    out.push({ kind: 'personal', id: person.id, name: `${person.name}'s account`, personIds: [person.id], cyclePersonId: person.id })
+    const cycle = data.payCycles.find((c) => c.personId === person.id)!
+    out.push({ kind: 'personal', id: person.id, name: `${person.name}'s account`, personIds: [person.id], cyclePersonId: person.id, overdraftAmount: cycle.overdraftAmount ?? 0 })
   }
 
   for (const pot of data.pots ?? []) {
     if (!pot.active) continue
     if (pot.isCoinJar === true) continue // a Coin Jar emptying is it working
-    out.push({ kind: 'pot', id: pot.id, name: pot.name, personIds: [pot.personId], cyclePersonId: pot.personId })
+    out.push({ kind: 'pot', id: pot.id, name: pot.name, personIds: [pot.personId], cyclePersonId: pot.personId, overdraftAmount: pot.overdraftAmount ?? 0 })
   }
 
   // Joint alerts BOTH people — the account has two owners, so the same rule
@@ -132,6 +171,7 @@ export function watchedAccounts(data: AppDataV2): WatchedAccount[] {
       name: 'the joint account',
       personIds: data.people.map((p) => p.id),
       cyclePersonId: data.primaryPersonId || data.people[0].id,
+      overdraftAmount: data.jointAccount.overdraftAmount ?? 0,
     })
   }
 
@@ -207,40 +247,57 @@ function label(t: Transaction, data: AppDataV2): string {
  */
 export function findShortfalls(data: AppDataV2, asOfDate: Date = new Date()): Shortfall[] {
   const out: Shortfall[] = []
+  const todayIso = toIso(asOfDate)
+
   for (const account of watchedAccounts(data)) {
     const [cycle] = horizonCycles(data, account.cyclePersonId, 'current_cycle', asOfDate)
     const c = accountCycle(data, account, asOfDate)
     if (!c) continue
     const series = buildDailyBalanceSeries(c.openingBalance, c.transactions, c.days, c.sign, c.include)
-    // The FIRST day it goes under, not the worst day and not the last: the
-    // question being answered is "when does the money run out".
-    const dip = series.find((p) => p.projectedBalance < 0)
-    if (!dip) continue
+    const limit = account.overdraftAmount
+
+    // TWO floors, and the more severe one wins (PROMPT-15 §0 Q6).
+    //
+    // 🚨 `'overdraft'` only exists when there IS an arranged buffer. With no
+    // limit, dipping below zero IS running out of money — getting this wrong
+    // downgrades a real alert into a heads-up.
+    const pastLimit = series.find((p) => p.projectedBalance < -limit)
+    const belowZero = limit > 0 ? series.find((p) => p.projectedBalance < 0) : undefined
+    const hit = pastLimit ?? belowZero
+    if (!hit) continue
+    const severity: Severity = pastLimit ? 'shortfall' : 'overdraft'
+
+    // The floor this severity is about, and the amount measured from it.
+    // 'overdraft' → how far below zero. 'shortfall' → how much you are short by.
+    const floor = severity === 'shortfall' ? -limit : 0
+    const amount = Math.round((floor - hit.projectedBalance) * 100) / 100
 
     // What is leaving the account THAT DAY. Taken from the same transaction
     // list the balance was walked from, so the alert can never name a payment
     // that did not contribute to the number beside it.
     const causes = c.transactions
-      .filter((t) => t.date === dip.date && c.include(t) && c.sign(t) < 0)
+      .filter((t) => t.date === hit.date && c.include(t) && c.sign(t) < 0)
       .map((t) => ({ label: label(t, data), amount: Math.round(-c.sign(t) * 100) / 100 }))
       .sort((a, b) => b.amount - a.amount)
 
     // The next day money arrives, from the same list again, with how much
     // arrives that day in total.
-    const incoming = c.transactions.filter((t) => t.date > dip.date && c.include(t) && c.sign(t) > 0)
+    const incoming = c.transactions.filter((t) => t.date > hit.date && c.include(t) && c.sign(t) > 0)
     const nextInDate = incoming.map((t) => t.date).sort()[0] ?? null
     const nextMoneyIn = nextInDate
       ? { date: nextInDate, amount: Math.round(incoming.filter((t) => t.date === nextInDate).reduce((sum, t) => sum + c.sign(t), 0) * 100) / 100 }
       : null
 
-    // Whether it actually recovers — read straight off the same walk, which
-    // visits every day and is not anchored to the cycle boundary.
-    const recoversOn = series.find((p) => p.date > dip.date && p.projectedBalance >= 0)?.date ?? null
+    // Whether it recovers — back within THIS severity's floor, not back above
+    // zero. A different line from the dip test, and easy to miss.
+    const recoversOn = series.find((p) => p.date > hit.date && p.projectedBalance >= floor)?.date ?? null
 
     out.push({
       account,
-      date: dip.date,
-      amount: Math.round(-dip.projectedBalance * 100) / 100,
+      severity,
+      date: hit.date,
+      isPast: hit.date < todayIso,
+      amount,
       cycleStart: toIso(cycle.start),
       cycleEnd: toIso(cycle.end),
       causes,
@@ -253,54 +310,58 @@ export function findShortfalls(data: AppDataV2, asOfDate: Date = new Date()): Sh
 
 /**
  * The notification a shortfall becomes. Nothing here is logged server-side (§47): it is built and
- * sent, never stored.
+ * sent, never stored. **Wording approved by Adam, 2026-09-22.**
  *
- * 🚨 IT LEADS WITH THE CAUSE, not the number. "Rent (£850.00) on 12 October takes it £212.40 below
- * zero" is something you can act on; "projected to go £212.40 below zero" leaves you to open the
- * app and work out why. Adam, 2026-09-22, asking for exactly this: *"is it possible to state what
- * the next bill is and it's value, or show x bills totalling x amount are due out on x date"*.
+ * 🚨 ONE BUILDER, NOT TWO. The severities share the cause-then-relief structure and differ only in
+ * which floor they measure from. Two builders would drift; one with a floor parameter cannot.
  *
- * The year is deliberately absent (`formatDayMonth`): the dip is always inside the current pay
- * cycle, so the year is noise on a lock screen.
+ * 🚨 IT LEADS WITH THE CAUSE, not the number: "Rent (£850.00) on 12 October takes you £212.40 into
+ * your £500 overdraft" is something you can act on.
  *
- * Three shapes, because one payment, several payments and none are genuinely different situations
- * and a single generic sentence would misdescribe two of them.
+ * 🚨 NEVER DESCRIBE A BALANCE BEYOND ITS FLOOR. For `'shortfall'` the figure is how much you are
+ * SHORT BY — the payment does not go through, so "£712.40 into your £500 overdraft" would be an
+ * impossible state (Adam, 2026-09-22).
  */
 export function shortfallMessage(shortfall: Shortfall): { title: string; body: string } {
   const on = formatDayMonth(shortfall.date)
   const ends = formatDayMonth(shortfall.cycleEnd)
-  const short = `£${shortfall.amount.toFixed(2)}`
-  const { causes } = shortfall
+  const money = `£${shortfall.amount.toFixed(2)}`
+  const { causes, severity, account } = shortfall
+  const limit = account.overdraftAmount
 
-  const cause =
-    causes.length === 1
-      ? `${causes[0].label} (£${causes[0].amount.toFixed(2)}) on ${on} takes it ${short} below zero.`
+  // Where the figure sits. Present tense for a dip still to come, past tense
+  // for one that has already happened (PROMPT-14, answered 2026-09-22) — the
+  // first dip is kept either way, because it seeds the suppression history.
+  const place =
+    severity === 'overdraft'
+      ? `${money} into your £${limit.toFixed(2).replace(/\.00$/, '')} overdraft`
+      : limit > 0
+        ? `${money} short, even with your £${limit.toFixed(2).replace(/\.00$/, '')} overdraft`
+        : `${money} short`
+
+  const cause = shortfall.isPast
+    ? `You've been ${place} since ${on}.`
+    : causes.length === 1
+      ? `${causes[0].label} (£${causes[0].amount.toFixed(2)}) on ${on} ${severity === 'overdraft' ? 'takes' : 'leaves'} you ${place}.`
       : causes.length > 1
-        ? `${causes.length} payments totalling £${total(causes).toFixed(2)} on ${on} take it ${short} below zero.`
-        : // Already under before anything was due that day — an account that
-          // starts the cycle overdrawn. There is no payment to blame, and
-          // naming one would be a lie.
-          `Projected to be ${short} below zero on ${on}.`
+        ? `${causes.length} payments totalling £${total(causes).toFixed(2)} on ${on} ${severity === 'overdraft' ? 'take' : 'leave'} you ${place}.`
+        : `You'll be ${place} on ${on}.`
 
-  // Whether it RECOVERS — the actionable half, and three genuinely different
-  // answers. "Cycle ends" only accidentally addressed this for a personal
-  // account (its cycle end is usually payday) and addressed nothing at all for
-  // a pot, which borrows its owner's cycle.
-  //
-  // 🚨 The middle case is the one that matters and the one that was missing.
-  // Adam, 2026-09-22: "I may have a scheduled deposit/withdrawal that might
-  // not be enough to cover the upcoming scheduled/pending payments". Saying
-  // "next money in on the 15th" when that money does not clear the shortfall
-  // reads as relief and is not — the alert would be lying reassuringly, which
-  // is worse than not sending it.
+  // 🚨 "You're fine" is carried by the ABSENCE of the middle shape. Weaker
+  // than an explicit "back above zero", and a deliberate trade for brevity —
+  // so the middle shape must keep appearing whenever the money does not cover
+  // it, because it is the only thing distinguishing the two.
   const relief = shortfall.recoversOn
-    ? `Back above zero on ${formatDayMonth(shortfall.recoversOn)}.`
+    ? `Next scheduled money in on ${formatDayMonth(shortfall.recoversOn)}.`
     : shortfall.nextMoneyIn
-      ? `£${shortfall.nextMoneyIn.amount.toFixed(2)} in on ${formatDayMonth(shortfall.nextMoneyIn.date)}, but still short after that.`
+      ? `£${shortfall.nextMoneyIn.amount.toFixed(2)} in on ${formatDayMonth(shortfall.nextMoneyIn.date)}, but you'll still be short after that.`
       : `Nothing more due in before ${ends}.`
 
   return {
-    title: `${possessive(shortfall.account)} runs short`,
+    // The TITLE carries the severity; the body's structure does not. The
+    // second one states the problem outright (Adam, 2026-09-22: "the
+    // labelling should be clear here, you don't have enough money").
+    title: severity === 'overdraft' ? `${possessive(account)} runs short` : `${possessive(account)}: not enough money`,
     body: `${cause} ${relief}`,
   }
 }
@@ -312,7 +373,7 @@ const total = (causes: { amount: number }[]) => Math.round(causes.reduce((sum, c
  *
  * The joint account is the only one that needs this: its stored name is lower-case prose ("the
  * joint account") because it reads correctly mid-sentence, and a notification TITLE is neither
- * mid-sentence nor lower-case — "the joint account runs short" in bold reads like a typo.
+ * mid-sentence nor lower-case.
  */
 function possessive(account: WatchedAccount): string {
   return account.kind === 'joint' ? 'Your joint account' : account.name
