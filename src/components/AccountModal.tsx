@@ -49,6 +49,8 @@ import { legacyOfferedKey } from '../lib/powersync/legacyData'
 import { describeBackupContents } from './BackupSection'
 import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
 import { isSameHouseholdPatch, rowsRemovedByPatch } from '../lib/store/powerSyncLedgerStore'
+import { ToggleSwitch } from './Toggle'
+import { forgetThisDevice, listDevices, pushState, removeDevice, sendTest, thisDeviceId, turnOffHere, turnOnHere, type Device, type PushState } from '../lib/powersync/push'
 import { useSyncControls } from './syncControls'
 
 /** personal-f / BLOC: an absent provider IS the email/password signal. */
@@ -461,10 +463,20 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
           }}
         />
 
+        {/* Low-balance alerts (PROMPT-14 Part 7). Sync-only UI, so it belongs
+            here rather than in a shared page behind a runtime check — the
+            offline bundle has to stay sync-free. The switch itself is the
+            SHARED Toggle.tsx, extracted from Home's filter sheet rather than
+            copied into this file. */}
+        <NotificationsCard />
+
         {note && <p className="text-xs text-center text-[var(--color-positive)] mb-3">{note}</p>}
         {error && <p className="text-xs text-center text-[var(--color-negative)] mb-3 break-words">{error}</p>}
 
-        <button onClick={() => void signOut()} className="w-full py-3 rounded-2xl text-sm font-medium text-[var(--color-ink)] mb-6" style={{ background: 'var(--color-bg-elevated)' }}>
+        {/* Signing out unregisters this phone first: otherwise someone else
+            signing in here would be sent this household's alerts. Best effort —
+            signing out must never be blocked by it, online or not. */}
+        <button onClick={() => void forgetThisDevice().finally(() => void signOut())} className="w-full py-3 rounded-2xl text-sm font-medium text-[var(--color-ink)] mb-6" style={{ background: 'var(--color-bg-elevated)' }}>
           Sign out
         </button>
 
@@ -658,5 +670,144 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
         {status && <p className="text-xs mt-3 text-center" style={{ color: status.error ? 'var(--color-negative)' : 'var(--color-positive)' }}>{status.error ? status.text : '✓ ' + status.text}</p>}
       </div>
     </div>
+  )
+}
+
+/**
+ * Low-balance alerts, per device (PROMPT-14 Part 7; Adam's spec, 2026-09-21:
+ * "a toggle on/off for push notifications in the account modal… we can re-use
+ * the toggle style from the home page filters").
+ *
+ * 🚨 IT BRANCHES ON `Notification.permission`, NOT ON TOGGLE HISTORY.
+ * Adam's "toggling on a second time instructs users where to go in settings"
+ * is right only when permission is actually DENIED. Toggling off does not
+ * revoke it, so the ordinary case is 'granted' and toggling back on should
+ * just work, silently — instructing someone to visit Settings when nothing is
+ * wrong there is worse than useless. `decidePushState` (pushState.ts) is where
+ * that decision lives, and `verify-notification-toggle.ts` proves every case.
+ *
+ * 🚨 THE SWITCH IS PER DEVICE. It reads from whether THIS browser's own
+ * subscription row exists on the server, never a user-level flag: a
+ * user-level boolean would render ON on a second phone that has never
+ * registered, and that phone would then receive nothing while claiming to be
+ * on. The device list below is here so "why is my phone not getting these" is
+ * answerable without a database query.
+ */
+function NotificationsCard() {
+  const [state, setState] = useState<PushState | null>(null)
+  const [devices, setDevices] = useState<Device[]>([])
+  const [hereId, setHereId] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ text: string; error: boolean } | null>(null)
+
+  const refresh = async () => {
+    try {
+      const list = await listDevices()
+      setDevices(list)
+      setHereId(await thisDeviceId())
+      setState(await pushState(list.map((d) => d.id)))
+    } catch (err) {
+      setMessage({ text: errorText(err), error: true })
+    }
+  }
+
+  useEffect(() => {
+    void refresh()
+  }, [])
+
+  const act = async (label: string, fn: () => Promise<void>) => {
+    setBusy(true)
+    setMessage(null)
+    try {
+      await fn()
+      await refresh()
+    } catch (err) {
+      setMessage({ text: errorText(err), error: true })
+      await refresh() // the switch must show what is TRUE, not what was tapped
+    } finally {
+      setBusy(false)
+      void label
+    }
+  }
+
+  if (state === null) {
+    return (
+      <Card>
+        <p className="text-xs text-[var(--color-ink-muted)]">Checking notifications on this device…</p>
+      </Card>
+    )
+  }
+
+  // Every way of being off says WHY, because there is no email fallback: a
+  // device that cannot receive push receives nothing at all.
+  const help: Record<PushState, string> = {
+    on: 'This device gets an alert at 8pm on any day one of your accounts is projected to dip below zero.',
+    off: 'This device is not registered, so it will not get alerts.',
+    ask: "You'll be asked to allow notifications.",
+    denied: 'Notifications are turned off for this app and it cannot ask again. Turn them on in iOS Settings → Notifications → Shared Ledger, then come back.',
+    'needs-install': 'On iPhone and iPad, notifications only work from the Home Screen app. Share → Add to Home Screen, then open it from there.',
+    unsupported: 'This browser cannot show notifications, so this device will not get alerts.',
+  }
+  const canToggle = state === 'on' || state === 'off' || state === 'ask'
+
+  return (
+    <Card>
+      <ToggleSwitch
+        full
+        label="Low-balance alerts"
+        help={help[state]}
+        checked={state === 'on'}
+        disabled={busy || !canToggle}
+        onChange={(next) =>
+          void act('toggle', async () => {
+            // 'granted' re-subscribes with NO prompt and no Settings
+            // instruction; 'default' asks; 'denied' never gets here, because
+            // the switch is disabled and the instruction is already showing.
+            if (next) await turnOnHere()
+            else await turnOffHere()
+          })
+        }
+      />
+
+      {state === 'on' && (
+        <button
+          onClick={() =>
+            void act('test', async () => {
+              const r = await sendTest()
+              setMessage({ text: r.sent > 0 ? `Sent to ${r.sent} device${r.sent === 1 ? '' : 's'}.` : 'Nothing was sent — no device is registered.', error: false })
+            })
+          }
+          disabled={busy}
+          className="mt-3 w-full py-2.5 rounded-xl text-xs font-semibold text-[var(--color-ink)] disabled:opacity-60"
+          style={{ background: 'var(--color-surface)' }}
+        >
+          {busy ? 'Sending…' : 'Send me a test notification'}
+        </button>
+      )}
+
+      {devices.length > 0 && (
+        <div className="mt-3">
+          <p className="text-[11px] text-[var(--color-ink-faint)] mb-1">Registered devices</p>
+          {devices.map((d) => (
+            <div key={d.id} className="flex items-center justify-between gap-2 py-1">
+              <span className="text-xs text-[var(--color-ink-muted)] truncate">
+                {d.label}
+                {d.id === hereId ? ' · this device' : ''}
+                {d.failedCount > 0 ? ` · ${d.failedCount} failed send${d.failedCount === 1 ? '' : 's'}` : ''}
+              </span>
+              <button onClick={() => void act('remove', () => removeDevice(d.id))} disabled={busy} className="text-[11px] font-semibold text-[var(--color-ink-muted)] shrink-0">
+                Remove
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {message && (
+        <p className="text-xs mt-2" style={{ color: message.error ? 'var(--color-negative)' : 'var(--color-positive)' }}>
+          {message.text}
+        </p>
+      )}
+    </Card>
   )
 }

@@ -46,6 +46,7 @@ import { AccountModal } from './AccountModal'
 import { DuplicatePersonBanner } from './DuplicatePersonBanner'
 import { HeaderAccessoryContext } from './HeaderAccessory'
 import { BackupPlacementContext } from './BackupSection'
+import { registerServiceWorker } from '../lib/powersync/push'
 import { SyncControlsContext, type SyncControls } from './syncControls'
 import { LegacyDataMigration } from './LegacyDataMigration'
 import { LEDGER_STREAM, POWERSYNC_DB_FILENAME, powerSyncConnector, powerSyncDb } from '../lib/powersync/database'
@@ -99,6 +100,13 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
       setAttempt((a) => a + 1)
     })()
   }
+
+  // Registered on EVERY boot, not only when alerts are on, so a changed
+  // sw.js reaches every device on its next launch. It has no fetch handler and
+  // caches nothing (public/sw.js), so it cannot pin an old build — the failure
+  // mode that makes service workers dangerous in a PWA. A failure is logged,
+  // never thrown: alerts are a feature, not the app.
+  useEffect(() => registerServiceWorker(), [])
 
   useEffect(() => {
     let cancelled = false
