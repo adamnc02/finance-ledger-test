@@ -68,16 +68,41 @@
 // resync); saves in between are translated through the same id map.
 //
 // "SET AS ME" LINKS THE ROW (PROMPT-10 Part 4; MIGRATION-LESSONS §18; Adam,
-// 2026-09-19: Set as me = link + view). LedgerContext only changes
-// primaryPersonId; this store turns that into people.linked_user_id = me,
-// clearing my previous row first (the (household, linked_user_id) unique
-// index), as one-column UPDATEs at the ends of the save:
-//   - an unlinked row, or an import's own "Me" row → linked to me;
-//   - a row linked to someone else → view only, never taken, UNLESS I have
-//     no linked row at all (Ella claiming her row after Adam tapped it:
-//     she can; his device falls back to its own choice);
-//   - primaryPersonId moving only because my person was deleted → nothing.
+// 2026-09-19: Set as me = link + view). LedgerContext changes primaryPersonId
+// AND calls setPrimaryPerson() first (LedgerStore.ts, PROMPT-16 Part A); this
+// store turns the TAP into people.linked_user_id = me, clearing my previous
+// row first (the (household, linked_user_id) unique index), as one-column
+// UPDATEs at the ends of the save:
+//   - a tap on an unlinked row, or an import's own "Me" row → linked to me,
+//     whether or not the view moved (tapping the person you already look at
+//     still links: the button's contract is "this is me", not "change view");
+//   - a tap on a row linked to someone else → view only, never taken, UNLESS
+//     I have no linked row at all (Ella claiming her row after Adam tapped it
+//     before she joined);
+//   - a save with NO tap never writes a link, whatever primaryPersonId did.
+// 🚨 PROMPT-16 (2026-09-22): the tap used to be INFERRED from
+// primaryPersonId changing. Two live defects fell out of that one line:
+// Adam's production row was never linked (his view was already right, so
+// "Set as me" changed nothing, so nothing was written — and low-balance
+// alerts are addressed from the link, so they were silent), and the claim
+// path was reachable from ANY save that moved the view, not only a tap. §39,
+// one field down: intent comes from the caller, never from a diff.
 // verify-set-as-me.ts.
+//
+// 🚨 A LINK CAN ONLY BE WRITTEN BY THE USER IT BELONGS TO. The server's
+// people_enforce_self_link trigger refuses (42501, discarded by the
+// connector) any linked_user_id that is not auth.uid(). So this device can
+// link ME and nobody else — which is why PROMPT-14 Part 5's "re-link every
+// member by name after a restore" could never work live (the unit passed
+// against a fake with no trigger; the integration failed three times on
+// 2026-09-22) and is gone. Instead EVERY DEVICE REMEMBERS WHO IT LAST SHOWED
+// (id + name, resolved by choice or by link) and, on boot, identityAction()
+// decides: linked → ready; my chosen row unlinked → link it (self-heal, fills
+// an empty column, can never take anyone's); the person I was showing is
+// gone or now someone else's → link the ONE unlinked person with the same
+// name, else ASK — never fall back to people[0], which is the silent
+// reassignment §23 and Part 5 exist to prevent. verify-restore-preserves-
+// identity.ts.
 
 import type { AppDataV2 } from '../../types/ledger'
 import { migrateLedgerData } from '../ledgerStorage'
@@ -166,65 +191,79 @@ function collectOwnIds(data: AppDataV2, out: Set<string>) {
   }
 }
 
-/** The one op shape "Set as me" and Part 5's re-link both write: one column, one row. */
-export type LinkUpdate = Extract<Op, { kind: 'update' }> & { set: { linked_user_id: string } }
+/** How the last read resolved `primaryPersonId` (header: "primaryPersonId never syncs"). */
+export type ResolvedBy = 'choice' | 'link' | 'fallback' | 'none'
+
+/** The person this device last showed by choice or by link, remembered per device (PROMPT-16 Part F). */
+export interface ShownPerson {
+  id: string
+  name: string
+}
+
+/** What the boot sequence needs to know about identity, as of the last read. */
+export interface IdentityView {
+  /** The row linked to the signed-in user, if any. */
+  linkedPersonId: string | null
+  /** The person the last read resolved to, and how. */
+  primaryPersonId: string
+  resolvedBy: ResolvedBy
+  /** This device had chosen a person and that person no longer exists. */
+  staleChoice: boolean
+  /** The person this device last showed (by choice or link), or null on a device that never has. */
+  lastShown: ShownPerson | null
+  /** `linked_user_id` of a person row as the database holds it, or null. */
+  ownerOf(personId: string): string | null
+}
+
+export type IdentityAction =
+  | { kind: 'ready' }
+  | { kind: 'link'; personId: string; reason: 'self_heal' | 'remembered_name' }
+  | { kind: 'ask' }
+
+const sameName = (a: string, b: string) => a.trim().toLowerCase() === b.trim().toLowerCase()
 
 /**
- * 🚨 PROMPT-14 Part 5 — a restore must not silently reassign who everyone is.
+ * 🚨 PROMPT-16 Parts B and F — what a device does about its identity on boot, in one place.
  *
- * An import deletes every `people` row and inserts a fresh one (regenerateIds, §31), and
- * `linked_user_id` is a server-only column `toRows` never writes — so every OTHER member's link
- * dies with their old row. `linkOps` re-links only the person doing the restore. On Ella's next
- * sync, `assemble` walks choice → linked → people[0]: her stored choice is a dead id and there is
- * no linked row, so **she silently becomes whoever sorts first, and her pay cycle flips**. That is
- * the §23 failure `verify-first-sync-gate.ts` exists to prevent, arriving through a door it does
- * not watch.
+ * The rule, in order:
+ *  1. A row is linked to me → nothing to do. The link is the identity; the view follows it.
+ *  2. No link, but this device CHOSE the person it shows and that row is unlinked → link it
+ *     (Part B self-heal). This is Adam's production state: his device had always resolved to his
+ *     own row by choice, so the view was right and the link was never written. It can only ever
+ *     fill an EMPTY column, so it cannot move, overwrite or take anyone's link.
+ *  3. No link, and the person this device WAS showing is gone (a restore regenerated every id) or
+ *     is now linked to someone else → find the one UNLINKED incoming person with the same name.
+ *     Exactly one → link it (this is Part 5's re-link by name, now run by the only user the server
+ *     lets write that link). None, or more than one → ASK. A rename is the everyday case here and
+ *     it must ask, not guess.
+ *  4. No link, and either I have just joined bringing nothing, or my stored choice is dead → ASK
+ *     (the two cases SyncRoot already asked about).
+ *  5. Otherwise ready — a brand-new device in a one-person household is not asked a question with
+ *     one answer.
  *
- * So: carry each pre-restore link across to the incoming person **with the same name** (§0 Q4a).
- *
- * 🚨 Ambiguous or missing → DO NOT GUESS. No match, or more than one, leaves that member
- * unlinked, and their device asks "which person are you?" on its next boot (§0 Q4b, the flow a
- * fresh join already uses). "Just take the first match" is the same silent reassignment wearing a
- * different hat — it is the bug, not a simplification of the fix.
- *
- * Names are compared trimmed and case-insensitively, because a restore of a hand-edited file is
- * exactly where "Ella" becomes "ella".
- *
- * @param linked   person id → linked_user_id, as the DATABASE holds it right now (pre-restore)
- * @param before   the data those ids belong to (the shadow), for looking a person's name up
- * @param after    the incoming data, AFTER regenerateIds — the ids that will exist
- * @param exclude  a person id already being linked by linkOps (the restorer's own): never touched here
+ * 🚨 The trap this replaces: the ask was gated on `staleChoice`, which only exists for a user who
+ * OVERRODE their link. A member resolved BY link never stored a choice, so when a restore
+ * destroyed the link there was nothing to go stale, no ask, and `assemble` fell back to
+ * `people[0]` — Ella's phone silently showed Adam's dashboard and pay cycle (UAT 2026-09-22, run
+ * three, names matching). The device now remembers who it showed WHATEVER resolved it.
  */
-export function relinkOps(
-  linked: ReadonlyMap<string, string>,
-  before: AppDataV2,
-  after: AppDataV2,
-  myUserId: string,
-  exclude: string | null,
-): { ops: LinkUpdate[]; unresolved: string[] } {
-  const ops: LinkUpdate[] = []
-  const unresolved: string[] = []
-  const namesBefore = new Map(before.people.map((p) => [p.id, p.name]))
-  const byName = new Map<string, string[]>()
-  for (const p of after.people) {
-    const key = p.name.trim().toLowerCase()
-    byName.set(key, [...(byName.get(key) ?? []), p.id])
+export function identityAction(view: IdentityView, people: ReadonlyArray<{ id: string; name: string }>, justJoined: boolean): IdentityAction {
+  if (view.linkedPersonId) return { kind: 'ready' }
+  if (view.resolvedBy === 'choice' && view.primaryPersonId && view.ownerOf(view.primaryPersonId) === null) {
+    return { kind: 'link', personId: view.primaryPersonId, reason: 'self_heal' }
   }
-  for (const [personId, userId] of linked) {
-    if (userId === myUserId) continue // linkOps owns mine
-    const name = namesBefore.get(personId)
-    if (name === undefined) {
-      unresolved.push(userId)
-      continue
+  if (view.lastShown) {
+    const shown = view.lastShown
+    const owner = people.some((p) => p.id === shown.id) ? view.ownerOf(shown.id) : undefined
+    const lost = owner === undefined || owner !== null // gone, or now someone else's (mine is handled by rule 1)
+    if (lost) {
+      const matches = people.filter((p) => sameName(p.name, shown.name) && view.ownerOf(p.id) === null)
+      if (matches.length === 1) return { kind: 'link', personId: matches[0].id, reason: 'remembered_name' }
+      return { kind: 'ask' }
     }
-    const matches = (byName.get(name.trim().toLowerCase()) ?? []).filter((id) => id !== exclude)
-    if (matches.length !== 1) {
-      unresolved.push(userId)
-      continue
-    }
-    ops.push({ kind: 'update', table: 'people', id: matches[0], set: { linked_user_id: userId } })
   }
-  return { ops, unresolved }
+  if (justJoined || view.staleChoice) return { kind: 'ask' }
+  return { kind: 'ready' }
 }
 
 /** What the store needs from the database; the real one wraps PowerSync (powerSyncAdapter.ts), tests pass a fake. */
@@ -252,7 +291,9 @@ export interface PowerSyncLedgerStoreOptions {
   log?: Pick<Console, 'error' | 'warn' | 'info'>
 }
 
-export interface PowerSyncLedgerStore extends LedgerStore {
+export interface PowerSyncLedgerStore extends LedgerStore, IdentityView {
+  /** "Set as me": the next save whose primaryPersonId is `id` writes the link (LedgerStore.ts). */
+  setPrimaryPerson(id: string): void
   /** True once first sync is complete (the gate is open). */
   readonly synced: boolean
   /** True once the household was lost: nothing is written or delivered any more. */
@@ -263,12 +304,17 @@ export interface PowerSyncLedgerStore extends LedgerStore {
   readonly importMap: ReadonlyMap<string, string> | null
   /** The person row linked to the signed-in user ("Set as me"), as of the last read. */
   readonly linkedPersonId: string | null
+  /** The person the last read resolved to, and how (choice → link → fallback). */
+  readonly primaryPersonId: string
+  readonly resolvedBy: ResolvedBy
   /**
-   * This device had chosen a person and that person no longer exists (PROMPT-14 Part 5). After a
-   * restore that could not re-link by name, this is how the boot sequence knows to ASK rather than
-   * let `assemble` fall back to people[0].
+   * This device had chosen a person and that person no longer exists (PROMPT-14 Part 5). One of
+   * the two inputs `identityAction` uses to ASK rather than let `assemble` fall back to people[0].
    */
   readonly staleChoice: boolean
+  /** The person this device last showed by choice or link (PROMPT-16 Part F), or null. */
+  readonly lastShown: ShownPerson | null
+  ownerOf(personId: string): string | null
 }
 
 export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): PowerSyncLedgerStore {
@@ -294,6 +340,10 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
   let nextDeliveryWholesale = false
   const linkedTo = new Map<string, string>() // person id → linked_user_id, as the database holds it
   let staleChoice = false // a choice is stored on this device and that person is gone (Part 5)
+  let resolvedBy: ResolvedBy = 'none'
+  let resolvedPrimary = ''
+  let pendingTap: string | null = null // setPrimaryPerson(id): the next save carrying this id IS "Set as me"
+  const shownKey = `${storageKey}:shown` // PROMPT-16 Part F: who this device last showed, by choice or link
   const knownLists = new WeakSet<object>() // every list the store has delivered, loaded or saved (isImport)
   const deliveries = new WeakSet<AppDataV2>() // every dataset the store handed out
   const remember = (d: AppDataV2) => {
@@ -333,6 +383,25 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
       log.warn('[powersync] could not remember the chosen person on this device', err)
     }
   }
+  const readShown = (): ShownPerson | null => {
+    try {
+      const raw = storage?.getItem(shownKey)
+      if (!raw) return null
+      const parsed = JSON.parse(raw) as Partial<ShownPerson>
+      return typeof parsed.id === 'string' && typeof parsed.name === 'string' ? { id: parsed.id, name: parsed.name } : null
+    } catch {
+      return null
+    }
+  }
+  const writeShown = (shown: ShownPerson) => {
+    const prev = readShown()
+    if (prev && prev.id === shown.id && prev.name === shown.name) return
+    try {
+      storage?.setItem(shownKey, JSON.stringify(shown))
+    } catch (err) {
+      log.warn('[powersync] could not remember the shown person on this device', err)
+    }
+  }
 
   function assemble(rows: Rows): AppDataV2 {
     positions.clear()
@@ -350,22 +419,39 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     const choice = readChoice()
     const linked = (rows.people ?? []).find((r) => r.linked_user_id === userId)?.id
     staleChoice = choice !== null && !ids.has(choice)
-    const primaryPersonId = choice && ids.has(choice) ? choice : linked && ids.has(linked) ? linked : (base.people[0]?.id ?? '')
+    let primaryPersonId: string
+    if (choice && ids.has(choice)) {
+      primaryPersonId = choice
+      resolvedBy = 'choice'
+    } else if (linked && ids.has(linked)) {
+      primaryPersonId = linked
+      resolvedBy = 'link'
+    } else {
+      primaryPersonId = base.people[0]?.id ?? ''
+      resolvedBy = primaryPersonId ? 'fallback' : 'none'
+    }
+    resolvedPrimary = primaryPersonId
+    // Part F: remember who this device shows, but only when it can SAY who — the people[0]
+    // fallback is the failure this memory exists to detect, so it never counts as "shown".
+    if (resolvedBy === 'choice' || resolvedBy === 'link') {
+      const shown = base.people.find((p) => p.id === primaryPersonId)
+      if (shown) writeShown({ id: shown.id, name: shown.name })
+    }
     return migrateLedgerData({ ...base, primaryPersonId })
   }
 
-  /** "Set as me" as one-column UPDATEs: `first` before the diff's writes, `last` after (see header). */
-  function linkOps(before: AppDataV2, after: AppDataV2, imported: boolean): { first: Op[]; last: Op[] } {
+  /**
+   * "Set as me" as one-column UPDATEs: `first` before the diff's writes, `last` after (see header).
+   * `tapped` is the ONLY thing that makes an ordinary save write a link (PROMPT-16 Part A); an
+   * import links its own new "Me" as before. Nothing is inferred from `primaryPersonId` moving.
+   */
+  function linkOps(after: AppDataV2, imported: boolean, tapped: boolean): { first: Op[]; last: Op[] } {
     const none = { first: [], last: [] }
     const target = after.primaryPersonId
     if (!target || !after.people.some((p) => p.id === target)) return none
-    if (!imported) {
-      if (target === before.primaryPersonId) return none
-      const old = before.primaryPersonId
-      if (before.people.some((p) => p.id === old) && !after.people.some((p) => p.id === old)) return none // my person was deleted
-    }
+    if (!imported && !tapped) return none
     const mine = [...linkedTo].find(([, uid]) => uid === userId)?.[0]
-    if (mine === target) return none
+    if (mine === target) return none // my link is already right
     const owner = linkedTo.get(target)
     if (owner && owner !== userId && mine) {
       log.info('[powersync] Set as me: that person is linked to someone else — switched view only')
@@ -398,8 +484,22 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     get linkedPersonId() {
       return [...linkedTo].find(([, uid]) => uid === userId)?.[0] ?? null
     },
+    get primaryPersonId() {
+      return resolvedPrimary
+    },
+    get resolvedBy() {
+      return resolvedBy
+    },
     get staleChoice() {
       return staleChoice
+    },
+    get lastShown() {
+      return readShown()
+    },
+    ownerOf: (personId) => linkedTo.get(personId) ?? null,
+
+    setPrimaryPerson(id) {
+      pendingTap = id
     },
 
     async load() {
@@ -456,21 +556,22 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
           target = applyIdMap(next, importMap)
         }
         if (target.primaryPersonId !== shadow.primaryPersonId && target.primaryPersonId) writeChoice(target.primaryPersonId)
-        // linkOps mutates linkedTo, so take the database's view first.
-        const linkedBeforeImport = new Map(linkedTo)
-        const link = linkOps(shadow, target, imported)
-        // Part 5: an import kills every other member's link, because their row
-        // is deleted and reborn. Carry each one across by name, in the same
-        // narrow one-column shape, AFTER the diff has done the deleting (the
-        // (household, linked_user_id) unique index).
-        const relink = imported ? relinkOps(linkedBeforeImport, shadow, target, userId, link.last[0]?.kind === 'update' ? link.last[0].id : null) : { ops: [] as LinkUpdate[], unresolved: [] as string[] }
-        if (relink.unresolved.length > 0) {
-          log.warn(
-            `[powersync] restore: ${relink.unresolved.length} household member(s) could not be re-linked by name — their device will ask which person they are (PROMPT-14 Part 5)`,
-          )
+        // The tap is consumed by the first save that gets this far: the one
+        // carrying its id is "Set as me"; one carrying anything else means the
+        // tap's state never landed (the person vanished), and it is stale.
+        const tapped = pendingTap !== null && pendingTap === target.primaryPersonId
+        pendingTap = null
+        const link = linkOps(target, imported, tapped)
+        if (imported) {
+          const others = [...linkedTo.values()].filter((uid) => uid !== userId).length
+          if (others > 0) {
+            // Their rows are deleted and reborn, and only THEY can write their
+            // link (people_enforce_self_link). Each of their devices re-links
+            // itself by the remembered name, or asks (identityAction).
+            log.info(`[powersync] restore: ${others} other household member(s) will re-link themselves by name on their next boot, or be asked (PROMPT-16 Part F)`)
+          }
         }
-        for (const op of relink.ops) linkedTo.set(op.id, op.set.linked_user_id)
-        const ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last, ...relink.ops]
+        const ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last]
         for (const op of ops) {
           if (op.kind === 'insert') (present.get(op.table) ?? present.set(op.table, new Set()).get(op.table)!).add(op.row.id)
           if (op.kind === 'delete') present.get(op.table)?.delete(op.id)
