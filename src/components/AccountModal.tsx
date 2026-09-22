@@ -10,10 +10,16 @@
 //     and Join with a code (BUILD-PLAN 4.4: inside this modal, not a
 //     separate one). Redeem moves your own data server-side, so this device
 //     clears its copy and boots again through the first-sync gate;
-//   - Cloud Backup: Back Up Now / Restore (BUILD-PLAN 4.5). Restore replaces
-//     the WHOLE HOUSEHOLD's data, so it sits behind a warning that says so
-//     (DECISIONS Q9) and goes through the app's normal restore (setData),
-//     which the store turns into an id-regenerating import;
+//   - Backup & Restore (BUILD-PLAN 4.5; merged into one pair in PROMPT-14
+//     Parts 1-3). Back Up Now and Restore each open one follow-up step —
+//     cloud or this device / cloud or a file — over ONE format: a cloud
+//     snapshot and a downloaded file are the same AppDataV2 JSON, which is
+//     what makes a single step over a single format possible at all. The
+//     file route moved here from the Wallet page, whose Backup slot this app
+//     claims (BackupSection.tsx). Restore replaces the WHOLE HOUSEHOLD's
+//     data, so it sits behind a warning that says so (DECISIONS Q9) and goes
+//     through the app's normal restore (setData), which the store turns into
+//     an import;
 //   - Sign out;
 //   - Delete my app data (DELETE-APP-DATA-SHARED-FINANCE-LEDGER.md), as built
 //     in PROMPT-09: two confirmations, instant, login kept:
@@ -27,9 +33,9 @@
 //          shows.
 // Everything is portalled to document.body (MIGRATION-LESSONS §15).
 
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
-import { CloudUpload, Copy, History, RefreshCw, X } from 'lucide-react'
+import { CloudUpload, Copy, Download, History, RefreshCw, Upload, X } from 'lucide-react'
 import type { Session } from '@supabase/supabase-js'
 import type { AppDataV2 } from '../types/ledger'
 import { useAuth } from '../context/AuthContext'
@@ -37,9 +43,11 @@ import { supabase } from '../lib/supabaseClient'
 import { POWERSYNC_DB_FILENAME, powerSyncDb } from '../lib/powersync/database'
 import { clearHouseholdCache } from '../lib/powersync/household'
 import { REJECTED_WRITES_KEY, readRejectedWrites } from '../lib/powersync/connector'
-import { downloadSnapshot, listSnapshots, removeAllSnapshots, uploadSnapshot, type SnapshotInfo } from '../lib/powersync/backup'
+import { downloadSnapshot, listSnapshots, pruneSnapshots, removeAllSnapshots, SNAPSHOTS_KEPT, uploadSnapshot, type SnapshotInfo } from '../lib/powersync/backup'
 import { duplicatePersonKey, getLinkCode, justJoinedKey, redeemLinkCode, regenerateLinkCode, rememberDuplicate } from '../lib/powersync/linking'
 import { legacyOfferedKey } from '../lib/powersync/legacyData'
+import { describeBackupContents } from './BackupSection'
+import { downloadLedgerBackup, parseLedgerBackupJson } from '../lib/ledgerStorage'
 import { useSyncControls } from './syncControls'
 
 /** personal-f / BLOC: an absent provider IS the email/password signal. */
@@ -66,12 +74,21 @@ export interface AccountLedger {
   setData: (data: AppDataV2) => void
 }
 
+/**
+ * Where a restore is coming from. Both routes carry everything the confirm needs to name the
+ * source, so the two can't describe the same act differently (PROMPT-14 Part 3).
+ */
+export type RestoreSource = { kind: 'cloud'; name: string } | { kind: 'file'; fileName: string; data: AppDataV2 }
+
 type Confirm =
   | { kind: 'delete1' }
   | { kind: 'delete2' }
   | { kind: 'regenerate' }
   | { kind: 'join'; code: string }
-  | { kind: 'restore'; name: string }
+  | { kind: 'restore'; source: RestoreSource }
+
+/** The one follow-up step Back Up Now and Restore each open (PROMPT-14 Parts 2 and 3). */
+type Step = null | 'backup-choice' | 'restore-choice' | 'cloud-list'
 
 const errorText = (err: unknown) => (err instanceof Error ? err.message : typeof err === 'object' && err && 'message' in err ? String((err as { message: unknown }).message) : String(err))
 
@@ -88,7 +105,8 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
   const [code, setCode] = useState<string | null>(null)
   const [joinCode, setJoinCode] = useState('')
   const [snapshots, setSnapshots] = useState<SnapshotInfo[] | null>(null)
-  const [restoreOpen, setRestoreOpen] = useState(false)
+  const [step, setStep] = useState<Step>(null)
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
     if (!ledger) return
@@ -139,14 +157,29 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
       restart('Joined the household. Syncing it to this device…')
     })
 
-  const restore = (name: string) =>
+  /**
+   * The ONE function both restore routes converge on (PROMPT-14 Part 3). A cloud snapshot and a
+   * downloaded file are the same JSON — `uploadSnapshot` writes the app's own AppDataV2 and
+   * `downloadSnapshot` parses it back through `parseLedgerBackupJson`, the identical function
+   * the file picker uses — so there is nothing legitimate for two paths to do differently, and
+   * two paths is how they start drifting. `verify-backup-format-parity.ts` holds that invariant.
+   */
+  const restoreFrom = (source: RestoreSource) =>
     run('restore', async () => {
       if (!ledger) return
-      const data = await downloadSnapshot(userId, name)
+      const data = source.kind === 'cloud' ? await downloadSnapshot(userId, source.name) : source.data
       ledger.setData(data)
-      setRestoreOpen(false)
-      setNote(`Restored the backup from ${name.replace('.json', '')}.`)
+      setStep(null)
+      setNote(source.kind === 'cloud' ? `Restored the backup from ${source.name.replace('.json', '')}.` : `Restored ${source.fileName}.`)
     })
+
+  function handleRestoreFile(file: File) {
+    setError(null)
+    file
+      .text()
+      .then((text) => setConfirm({ kind: 'restore', source: { kind: 'file', fileName: file.name, data: parseLedgerBackupJson(text) } }))
+      .catch((err) => setError(errorText(err)))
+  }
 
   const lastSynced = status.lastSyncedAt ? status.lastSyncedAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : 'not yet'
   const others = ledger ? ledger.data.people.length : 0
@@ -281,14 +314,24 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
           </div>
         </Card>
 
-        {/* Cloud Backup */}
+        {/* Backup & Restore (PROMPT-14 Parts 1-3): ONE pair of buttons, each
+            with a cloud-or-this-device follow-up step. Both existing flows are
+            unchanged behind it; the file route moved here from the Wallet page,
+            whose slot this app claims (BackupSection.tsx).
+
+            🚨 The gate is `ledger`. SyncRoot only hands it over in the 'ready'
+            phase, which it reaches by awaiting store.load() — and that resolves
+            only after first sync. Restoring into a half-populated shadow would
+            diff against rows that have not arrived and DELETE what it cannot
+            see, so "available once your household has synced" is a real guard,
+            not a courtesy. */}
         {ledger ? (
-          restoreOpen ? (
+          step === 'cloud-list' ? (
             <Card>
               <div className="flex items-center justify-between mb-2">
-                <p className="text-sm font-semibold text-[var(--color-ink)]">Restore a backup</p>
-                <button onClick={() => setRestoreOpen(false)} className="text-xs text-[var(--color-ink-muted)]">
-                  Cancel
+                <p className="text-sm font-semibold text-[var(--color-ink)]">Restore a cloud backup</p>
+                <button onClick={() => setStep('restore-choice')} className="text-xs text-[var(--color-ink-muted)]">
+                  Back
                 </button>
               </div>
               {snapshots === null ? (
@@ -300,7 +343,7 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
                   {snapshots.map((s) => (
                     <button
                       key={s.name}
-                      onClick={() => setConfirm({ kind: 'restore', name: s.name })}
+                      onClick={() => setConfirm({ kind: 'restore', source: { kind: 'cloud', name: s.name } })}
                       disabled={busy !== null}
                       className="w-full text-left text-sm py-2 px-3 rounded-xl text-[var(--color-ink)] disabled:opacity-60"
                       style={{ background: 'var(--color-surface)' }}
@@ -311,30 +354,85 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
                 </div>
               )}
             </Card>
-          ) : (
+          ) : step === 'backup-choice' || step === 'restore-choice' ? (
             <Card>
-              <p className="text-sm font-semibold text-[var(--color-ink)] mb-0.5">Cloud Backup</p>
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-sm font-semibold text-[var(--color-ink)]">{step === 'backup-choice' ? 'Back up where?' : 'Restore from where?'}</p>
+                <button onClick={() => setStep(null)} className="text-xs text-[var(--color-ink-muted)]">
+                  Cancel
+                </button>
+              </div>
               <p className="text-xs text-[var(--color-ink-muted)] mb-3">
-                {snapshots?.[0] ? `Last backed up ${snapshots[0].name.replace('.json', '')}` : 'No cloud backup yet'} · one a day, automatically
+                {step === 'backup-choice'
+                  ? 'The cloud copy and the file are the same backup — either can be restored anywhere.'
+                  : 'Either replaces this whole household, on every device.'}
               </p>
               <div className="flex gap-2">
                 <button
-                  onClick={() => void run('backup', async () => {
-                    await uploadSnapshot(userId, ledger.data)
-                    setSnapshots(await listSnapshots(userId))
-                    setNote('Backed up.')
-                  })}
+                  onClick={() => {
+                    if (step === 'backup-choice') {
+                      void run('backup', async () => {
+                        await uploadSnapshot(userId, ledger.data)
+                        await pruneSnapshots(userId)
+                        setSnapshots(await listSnapshots(userId))
+                        setStep(null)
+                        setNote('Backed up to the cloud.')
+                      })
+                    } else {
+                      setStep('cloud-list')
+                      void listSnapshots(userId).then(setSnapshots, (err) => setError(errorText(err)))
+                    }
+                  }}
+                  disabled={busy !== null || (step === 'backup-choice' && !status.connected)}
+                  className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-xl text-[var(--color-surface)] bg-[var(--color-ink)] disabled:opacity-60"
+                >
+                  <CloudUpload size={14} />
+                  {busy === 'backup' ? 'Backing up…' : 'Cloud'}
+                </button>
+                <button
+                  onClick={() => {
+                    if (step === 'backup-choice') {
+                      // Honours the choice literally (§0 Q6): a local download
+                      // never touches the network. It is exactly what you want
+                      // when sync is the thing that is broken.
+                      void downloadLedgerBackup(ledger.data)
+                      setStep(null)
+                      setNote('Saved a backup file to this device.')
+                    } else {
+                      fileInputRef.current?.click()
+                    }
+                  }}
+                  disabled={busy !== null}
+                  className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-xl text-[var(--color-ink)] disabled:opacity-60"
+                  style={{ background: 'var(--color-surface)' }}
+                >
+                  {step === 'backup-choice' ? <Download size={14} /> : <Upload size={14} />}
+                  {step === 'backup-choice' ? 'This device' : 'A file'}
+                </button>
+              </div>
+              {step === 'backup-choice' && !status.connected && (
+                // Disabled, not hidden, with the reason: hiding it would read
+                // as "cloud backup is gone".
+                <p className="text-[11px] text-[var(--color-ink-faint)] mt-2">Cloud is unavailable while this device is offline. A backup file still works.</p>
+              )}
+            </Card>
+          ) : (
+            <Card>
+              <p className="text-sm font-semibold text-[var(--color-ink)] mb-0.5">Backup &amp; Restore</p>
+              <p className="text-xs text-[var(--color-ink-muted)] mb-3">
+                {snapshots?.[0] ? `Last cloud backup ${snapshots[0].name.replace('.json', '')}` : 'No cloud backup yet'} · one a day, automatically · the last {SNAPSHOTS_KEPT} are kept
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setStep('backup-choice')}
                   disabled={busy !== null}
                   className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-xl text-[var(--color-surface)] bg-[var(--color-ink)] disabled:opacity-60"
                 >
                   <CloudUpload size={14} />
-                  {busy === 'backup' ? 'Backing up…' : 'Back Up Now'}
+                  Back Up Now
                 </button>
                 <button
-                  onClick={() => {
-                    setRestoreOpen(true)
-                    void listSnapshots(userId).then(setSnapshots, (err) => setError(errorText(err)))
-                  }}
+                  onClick={() => setStep('restore-choice')}
                   disabled={busy !== null}
                   className="flex-1 flex items-center justify-center gap-1.5 text-xs font-semibold py-2.5 rounded-xl text-[var(--color-ink)] disabled:opacity-60"
                   style={{ background: 'var(--color-surface)' }}
@@ -347,9 +445,20 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
           )
         ) : (
           <Card>
-            <p className="text-xs text-[var(--color-ink-muted)]">Cloud Backup is available once your household has synced.</p>
+            <p className="text-xs text-[var(--color-ink-muted)]">Backup &amp; Restore is available once your household has synced.</p>
           </Card>
         )}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={(e) => {
+            const file = e.target.files?.[0]
+            if (file) handleRestoreFile(file)
+            e.target.value = ''
+          }}
+        />
 
         {note && <p className="text-xs text-center text-[var(--color-positive)] mb-3">{note}</p>}
         {error && <p className="text-xs text-center text-[var(--color-negative)] mb-3 break-words">{error}</p>}
@@ -369,6 +478,7 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
       {confirm && (
         <ConfirmSheet
           confirm={confirm}
+          replacing={ledger ? describeBackupContents(ledger.data) : null}
           onCancel={() => setConfirm(null)}
           onDelete1={() => setConfirm({ kind: 'delete2' })}
           onGo={() => {
@@ -377,7 +487,7 @@ export function AccountModal({ ledger, onClose }: { ledger?: AccountLedger; onCl
             if (c.kind === 'delete2') void deleteMyData()
             if (c.kind === 'regenerate') void run('code', async () => setCode(await regenerateLinkCode()))
             if (c.kind === 'join') void join(c.code)
-            if (c.kind === 'restore') void restore(c.name)
+            if (c.kind === 'restore') void restoreFrom(c.source)
           }}
         />
       )}
@@ -446,14 +556,30 @@ const CONFIRM_TEXT: Record<Confirm['kind'], { title: string; body: string; go: s
   },
 }
 
-function ConfirmSheet({ confirm, onCancel, onDelete1, onGo }: { confirm: Confirm; onCancel: () => void; onDelete1: () => void; onGo: () => void }) {
+function ConfirmSheet({ confirm, replacing, onCancel, onDelete1, onGo }: { confirm: Confirm; replacing: string | null; onCancel: () => void; onDelete1: () => void; onGo: () => void }) {
   const t = CONFIRM_TEXT[confirm.kind]
   return (
     <div className="fixed inset-0 z-[10003] flex items-center justify-center px-6" style={{ background: 'rgba(0,0,0,0.6)' }} onClick={(e) => (e.stopPropagation(), onCancel())}>
       <div className="w-full max-w-sm rounded-2xl p-5" style={{ background: 'var(--color-surface)' }} onClick={(e) => e.stopPropagation()}>
         <h4 className="font-display text-base font-semibold text-[var(--color-ink)] mb-2">{t.title}</h4>
         {confirm.kind === 'join' && <p className="font-mono text-sm tracking-widest text-[var(--color-ink)] mb-2">{confirm.code}</p>}
-        {confirm.kind === 'restore' && <p className="text-sm font-semibold text-[var(--color-ink)] mb-2">Backup from {confirm.name.replace('.json', '')}</p>}
+        {confirm.kind === 'restore' && (
+          <>
+            {/* Name the source, say what it replaces, and — for a file, where the
+                incoming contents are known before the restore — say what arrives
+                instead. A cloud snapshot is only downloaded on Replace, so its
+                contents can't honestly be listed here. */}
+            <p className="text-sm font-semibold text-[var(--color-ink)] mb-2">
+              {confirm.source.kind === 'cloud' ? `Cloud backup from ${confirm.source.name.replace('.json', '')}` : confirm.source.fileName}
+            </p>
+            {replacing && (
+              <p className="text-xs text-[var(--color-ink-muted)] mb-2">
+                Replacing {replacing}
+                {confirm.source.kind === 'file' ? ` with ${describeBackupContents(confirm.source.data)}` : ''}.
+              </p>
+            )}
+          </>
+        )}
         <p className="text-sm text-[var(--color-ink-muted)] mb-4">{t.body}</p>
         <div className="flex gap-2">
           <button onClick={onCancel} className="flex-1 py-2.5 rounded-xl text-sm text-[var(--color-ink)]" style={{ background: 'var(--color-track)' }}>
