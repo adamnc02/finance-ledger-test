@@ -89,6 +89,20 @@
 // one field down: intent comes from the caller, never from a diff.
 // verify-set-as-me.ts.
 //
+// 🚨 A SECOND DEVICE MUST NOT RE-CREATE WHAT A RESTORE DELETED (PROMPT-16
+// Part G, found in UAT 2026-09-23). A wholesale restore reaches the other
+// device as many server commits: the new rows arrive, then the old
+// transactions are deleted, then the old templates, people and pay cycles.
+// In that window the app's auto-clearing pass sees old templates whose
+// occurrences have "gone missing" and materialises them again, and the
+// server accepts the inserts (right household). Eight such orphans, all
+// `auto:` rows pointing at ids of the previous generation, were in a real
+// export. So: a row id that arrived DELETED from the server during this
+// session is never re-inserted from this device's derived state. Only an
+// explicit setData (a restore or patch the user asked for) may bring one
+// back. With the other device offline for the restore nothing stale was
+// ever written, which is the control that pinned the mechanism.
+//
 // 🚨 A LINK CAN ONLY BE WRITTEN BY THE USER IT BELONGS TO. The server's
 // people_enforce_self_link trigger refuses (42501, discarded by the
 // connector) any linked_user_id that is not auth.uid(). So this device can
@@ -110,6 +124,7 @@ import type { LedgerStore } from './LedgerStore'
 import { fromRows, toRows, type Rows } from '../powersync/mapping'
 import { diffRows, type Op, type Positions } from '../powersync/writes'
 import { applyIdMap, FIXED_CATEGORY_IDS, regenerateIds } from '../powersync/importIds'
+import { dedupeKey } from '../projection'
 
 /** Every list in AppDataV2. */
 const LISTS = [
@@ -289,6 +304,8 @@ export interface PowerSyncLedgerStoreOptions {
   /** Called once if this user stops being a member of `householdId` (see header). */
   onHouseholdLost?: (reason: string) => void
   log?: Pick<Console, 'error' | 'warn' | 'info'>
+  /** TESTS ONLY: the control for verify-stale-writes-during-restore.ts. Never set in the app. */
+  unsafeRecreateRemotelyDeleted?: boolean
 }
 
 export interface PowerSyncLedgerStore extends LedgerStore, IdentityView {
@@ -342,6 +359,17 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
   let staleChoice = false // a choice is stored on this device and that person is gone (Part 5)
   let resolvedBy: ResolvedBy = 'none'
   let resolvedPrimary = ''
+  // PROMPT-16 Part G (2026-09-23): rows another device deleted during this
+  // session, as `table:id`. This device must never re-create one from its own
+  // derived state — see the header. `ownDeletes` keeps this device's deletes
+  // out of that set.
+  const remotelyDeleted = new Set<string>()
+  const ownDeletes = new Set<string>()
+  const rowKey = (table: string, id: string) => `${table}:${id}`
+  // …and the occurrence SLOTS those deleted transactions filled (projection's dedupeKey). The
+  // auto-clearing pass regenerates a missing slot under an `auto:` id even when the row it replaces
+  // had a hand-logged id, so matching on the id alone misses most of the damage.
+  const remotelyDeletedSlots = new Set<string>()
   let pendingTap: string | null = null // setPrimaryPerson(id): the next save carrying this id IS "Set as me"
   const shownKey = `${storageKey}:shown` // PROMPT-16 Part F: who this device last showed, by choice or link
   const knownLists = new WeakSet<object>() // every list the store has delivered, loaded or saved (isImport)
@@ -404,17 +432,37 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
   }
 
   function assemble(rows: Rows): AppDataV2 {
+    // Part G: which rows vanished since the last read, and who deleted them.
+    const wasPresent = new Map([...present].map(([t, ids]) => [t, new Set(ids)]))
     positions.clear()
     present.clear()
     linkedTo.clear()
     for (const r of rows.people ?? []) if (typeof r.linked_user_id === 'string' && r.linked_user_id) linkedTo.set(r.id, r.linked_user_id)
+    const lastTx = new Map((lastDelivered ?? shadow)?.transactions.map((t) => [t.id, t]) ?? [])
     for (const [table, list] of Object.entries(rows)) {
-      present.set(table, new Set(list.map((r) => r.id)))
+      const now = new Set(list.map((r) => r.id))
+      for (const id of wasPresent.get(table) ?? []) {
+        if (now.has(id)) continue
+        const key = rowKey(table, id)
+        if (ownDeletes.delete(key)) continue // this device deleted it: not a remote deletion
+        remotelyDeleted.add(key)
+        if (table === 'transactions') {
+          const slot = lastTx.get(id) ? dedupeKey(lastTx.get(id)!) : null
+          if (slot) remotelyDeletedSlots.add(slot)
+        }
+      }
+      for (const id of now) remotelyDeleted.delete(rowKey(table, id)) // re-created by someone: no longer "deleted"
+      present.set(table, now)
       const known = new Map<string, number>()
       for (const r of list) if (typeof r.position === 'number') known.set(r.id, r.position)
       positions.set(table, known)
     }
     const base = fromRows(rows)
+    // A slot filled again by anyone (the server holds a row for it) is no longer "deleted".
+    if (remotelyDeletedSlots.size > 0) for (const t of base.transactions) {
+      const slot = dedupeKey(t)
+      if (slot) remotelyDeletedSlots.delete(slot)
+    }
     const ids = new Set(base.people.map((p) => p.id))
     const choice = readChoice()
     const linked = (rows.people ?? []).find((r) => r.linked_user_id === userId)?.id
@@ -571,14 +619,59 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
             log.info(`[powersync] restore: ${others} other household member(s) will re-link themselves by name on their next boot, or be asked (PROMPT-16 Part F)`)
           }
         }
-        const ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last]
+        let ops = [...link.first, ...diffRows(toRows(shadow, ctx), toRows(target, ctx), positions, present), ...link.last]
+        // 🚨 PROMPT-16 Part G: never re-create a row another device deleted in
+        // this session, unless the user explicitly restored a file (setData).
+        // While a restore syncs down, this device sees the old transactions
+        // gone before the old templates and pay cycles are, and the app's
+        // auto-clearing pass materialises them again from derived state; the
+        // server accepts them (right household) and they survive as orphans
+        // pointing at ids that no longer exist. verify-stale-writes-during-
+        // restore.ts. `unsafeRecreateRemotelyDeleted` exists ONLY for that
+        // check's control.
+        let droppedRows: Map<string, Set<string>> | null = null
+        if (!setDataCall && !opts.unsafeRecreateRemotelyDeleted) {
+          const kept: Op[] = []
+          const slotOf = new Map(target.transactions.map((t) => [t.id, dedupeKey(t)]))
+          const refillsDeletedSlot = (op: Op) => op.kind === 'insert' && op.table === 'transactions' && remotelyDeletedSlots.has(slotOf.get(op.row.id) ?? '')
+          for (const op of ops) {
+            if (op.kind === 'insert' && (remotelyDeleted.has(rowKey(op.table, op.row.id)) || refillsDeletedSlot(op))) {
+              droppedRows ??= new Map()
+              ;(droppedRows.get(op.table) ?? droppedRows.set(op.table, new Set()).get(op.table)!).add(op.row.id)
+            } else kept.push(op)
+          }
+          if (droppedRows) {
+            const n = [...droppedRows.values()].reduce((s, ids) => s + ids.size, 0)
+            log.warn(`[powersync] 🚨 dropped ${n} insert(s) that would re-create rows another device deleted — a restore is syncing down (PROMPT-16 Part G)`)
+            ops = kept
+          }
+        }
         for (const op of ops) {
-          if (op.kind === 'insert') (present.get(op.table) ?? present.set(op.table, new Set()).get(op.table)!).add(op.row.id)
-          if (op.kind === 'delete') present.get(op.table)?.delete(op.id)
+          if (op.kind === 'insert') {
+            ;(present.get(op.table) ?? present.set(op.table, new Set()).get(op.table)!).add(op.row.id)
+            remotelyDeleted.delete(rowKey(op.table, op.row.id)) // an explicit restore may legitimately bring one back
+            if (op.table === 'transactions') {
+              const t = target.transactions.find((x) => x.id === op.row.id)
+              const slot = t ? dedupeKey(t) : null
+              if (slot) remotelyDeletedSlots.delete(slot)
+            }
+          }
+          if (op.kind === 'delete') {
+            present.get(op.table)?.delete(op.id)
+            ownDeletes.add(rowKey(op.table, op.id))
+          }
         }
         remember(next)
         remember(target)
-        shadow = target
+        if (droppedRows) {
+          // The shadow must not carry the rows that were NOT written, or an
+          // explicit restore of them later would diff as "already there".
+          const rows = toRows(target, ctx)
+          for (const [table, ids] of droppedRows) rows[table] = (rows[table] ?? []).filter((r) => !ids.has(r.id))
+          shadow = migrateLedgerData({ ...fromRows(rows), primaryPersonId: target.primaryPersonId })
+        } else {
+          shadow = target
+        }
         if (ops.length === 0) return
         writeVersion++
         writeChain = writeChain
