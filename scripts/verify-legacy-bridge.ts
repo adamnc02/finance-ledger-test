@@ -174,28 +174,26 @@ check(
   adaptedLoan?.totalAmount,
 )
 
-// ---- 5b. REGRESSION 2026-09-23: a POT-funded loan or bill must not cost its owner £0 ----
-// costForPerson() understands only 'personal' and the joint split. A 'pot'
-// location fell through to the joint branch, where a pot-funded item's
-// payee '' + 100% share computes a remainder of £0 — so the item contributed
-// NOTHING to any monthly total. Adam reported it on the What-if page: the card
-// correctly showed his £195 Monzo loan going £195 -> £0, while "Impact on
-// available cash" stayed blank. ledgerLoans.ts already normalises pot ->
-// personal in two places ("a pot-funded one can't be split at all"); the
-// bridge was the one place copying the location verbatim.
+// ---- 5b. A POT-funded item keeps its 'pot' location through the bridge ----
+// 🚨 CORRECTED 2026-09-23, same day. This first asserted the OPPOSITE — that
+// the bridge rewrites 'pot' to 'personal' so costForPerson() can see it. That
+// fixed the What-if impact but DOUBLE-COUNTED the baseline: the monthly
+// transfer INTO a pot is already a personal bill, so counting what the pot
+// then pays adds the same money twice. Adam's Bills pot takes £256.03/month
+// and pays exactly £256.03 of items, so "Available now (per month)" came out
+// £256.03 too low. The 'pot' -> 'personal' mapping now lives in
+// scenarios.ts's virtualLoanBill(), which is the IMPACT question, not the
+// baseline one. The bridge must leave the location alone.
 {
   const potLoan: Loan = { ...carLoan, id: 'pot-loan', location: 'pot', potId: 'bills-pot', payee: '', payeeSharePercent: 100 }
-  const potData = { ...ledgerData, loans: [...ledgerData.loans, potLoan] }
-  const bridged = buildLegacyAppData(potData, asOf)
+  const bridged = buildLegacyAppData({ ...ledgerData, loans: [...ledgerData.loans, potLoan] }, asOf)
   const bl = bridged.loans.find((l) => l.id === 'pot-loan')
-  check('A pot-funded loan is bridged as personal, not left as a pot the split cannot handle', bl?.location, 'personal')
-  check('...and its owner is preserved', bl?.ownerId, 'me')
+  check('The bridge leaves a pot-funded loan as "pot" — the pot deposit is what costs personal cash', bl?.location, 'pot')
   check(
-    'A pot-funded loan costs its OWNER its full monthly payment, not £0',
-    costForPerson({ ...(bl as never as { location: string }), cost: 250 } as never, 'me', bridged.people),
-    250,
+    'A pot-funded loan adds NOTHING to the personal baseline (its deposit already did)',
+    costForPerson({ ...(bl as never as object), cost: 250 } as never, 'me', bridged.people),
+    0,
   )
-  // Control: a JOINT loan must be untouched — it IS a real, splittable expense.
   const jointLoan: Loan = { ...carLoan, id: 'joint-loan', location: 'joint', ownerId: '', payee: 'me', payeeSharePercent: 50 }
   const jb = buildLegacyAppData({ ...ledgerData, loans: [...ledgerData.loans, jointLoan] }, asOf).loans.find((l) => l.id === 'joint-loan')
   check('CONTROL: a joint loan keeps its joint location', jb?.location, 'joint')

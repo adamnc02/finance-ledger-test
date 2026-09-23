@@ -81,11 +81,7 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
         name: template.name,
         cost: monthlyEquivalentCost(template),
         dueDay: parseLocalDate(template.anchorDate).getDate(),
-        // Same 'pot' -> 'personal' normalisation as the loans below, and for
-        // the same reason: costForPerson() has no 'pot' branch, so a
-        // pot-funded bill silently costs its owner £0. Adam's Gym, GiffGaff,
-        // Monzo Perks and Windscribe are all pot-funded.
-        location: template.location === 'pot' ? 'personal' : template.location,
+        location: template.location,
         payee: template.payee,
         payeeSharePercent: template.payeeSharePercent,
         category: category?.name ?? 'Other',
@@ -151,17 +147,7 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
       firstPaymentDate: nextDueIso,
       totalAmount: summary.remainingBalance,
       monthlyPayment: loan.monthlyPayment,
-      // 🚨 'pot' must become 'personal' here. costForPerson() knows only
-      // 'personal' and the joint split — a 'pot' location falls through to the
-      // joint branch, where a pot-funded loan's payee '' + 100% share yields
-      // £0, so the loan contributed NOTHING to any monthly total (Adam
-      // reported it 2026-09-23: the What-if card correctly showed £195 -> £0,
-      // while "Impact on available cash" stayed blank). ledgerLoans.ts already
-      // does exactly this in two places, for the stated reason that a
-      // pot-funded expense "can't be split at all"; the bridge was the one
-      // place that copied the location verbatim. A 'joint' loan is untouched:
-      // it IS a real, splittable expense.
-      location: loan.location === 'pot' ? 'personal' : loan.location,
+      location: loan.location,
       ownerId: loan.ownerId,
       payee: loan.payee,
       payeeSharePercent: loan.payeeSharePercent,

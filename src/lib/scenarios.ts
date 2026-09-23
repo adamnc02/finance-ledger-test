@@ -1203,7 +1203,26 @@ function virtualLoanBill(loan: Loan, cost: number): Bill {
     name: loan.name,
     cost,
     dueDay: 1,
-    location: loan.location,
+    // 🚨 'pot' becomes 'personal' HERE, and nowhere else. costForPerson()
+    // understands only 'personal' and the joint split, so a pot-funded loan
+    // fell into the joint branch where payee '' + 100% share yields £0 — the
+    // What-if card showed Adam's Monzo loan going £195 -> £0 while "Impact on
+    // available cash" stayed blank (reported 2026-09-23).
+    //
+    // 🚨 THIS MUST NOT BE DONE IN THE BRIDGE. Tried that first, and it
+    // DOUBLE-COUNTED the baseline: the monthly transfer INTO the pot is
+    // already a personal bill, so counting what the pot then pays adds the
+    // same money twice. Adam's Bills pot takes £256.03/month and pays exactly
+    // £256.03 of items (37 + 10 + 7 + 7.03 + 195), so "Available now (per
+    // month)" came out £256.03 too low. The baseline cost of a pot is its
+    // deposit; a pot-funded item costs personal cash nothing on top.
+    //
+    // Here it is right, because this is the IMPACT question, not the baseline
+    // one: clearing a £195 pot-funded loan frees £195 of the pot's capacity,
+    // which becomes personal cash by reducing the deposit. Same reasoning as
+    // ledgerLoans.ts's two settlement/overpayment fallbacks, which are also
+    // about a payment event rather than a standing monthly total.
+    location: loan.location === 'pot' ? 'personal' : loan.location,
     payee: loan.payee,
     payeeSharePercent: loan.payeeSharePercent,
     category: 'Loan',
