@@ -152,6 +152,8 @@ function SignedIn({ userId, email, children }: { userId: string; email: string; 
           userId,
           firstSync,
           storageKey: primaryPersonKey(userId),
+          deliveryDebounceMs: 400, // PROMPT-16 Part G: read a restore's burst of commits as one state
+
           // Deleted on another device, or moved by a link code redeemed
           // elsewhere: drop this device's copy, including anything queued for
           // the old household, and boot again so ensure_household() gives the

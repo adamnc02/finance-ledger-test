@@ -35,7 +35,13 @@
 //     exist;
 //  5. this device's OWN deletes are not confused with remote ones: deleting a
 //     transaction here and re-adding it (setData patch) still works;
-//  6. an explicit restore (setData) may re-create a remotely deleted id.
+//  6. an explicit restore (setData) may re-create a remotely deleted id;
+//  7. 🚨 the INSERT half of the window: new templates arrive before the file's
+//     transactions, the reader must not materialise occurrences for them
+//     (control: it does, and the file's rows then duplicate every slot —
+//     the TV License / Barkin Bistro pairs seen in three real exports);
+//  8. a template that has been present for two reads is materialised as
+//     normal, so a bill added on the other device still gets its occurrences.
 
 import { readFileSync } from 'node:fs'
 import { autoClearDuePayments } from '../src/lib/autoClear'
@@ -44,6 +50,7 @@ import { toRows } from '../src/lib/powersync/mapping'
 import { regenerateIds } from '../src/lib/powersync/importIds'
 import type { Op } from '../src/lib/powersync/writes'
 import { createPowerSyncLedgerStore, type SyncDatabase } from '../src/lib/store/powerSyncLedgerStore'
+import { dedupeKey } from '../src/lib/projection'
 import type { AppDataV2 } from '../src/types/ledger'
 import { FakeSyncDb, memoryStorage, tick } from './lib/fakeSyncDb'
 
@@ -74,17 +81,23 @@ function household(): AppDataV2 {
  * server does: everything up to the old transactions' deletes, then the rest. The other device's
  * onChange fires after each, so it is delivered the in-between state.
  */
-function splitWrites(db: FakeSyncDb, onHalf: () => Promise<void>): SyncDatabase {
+function splitWrites(db: FakeSyncDb, onHalf: () => Promise<void>, at: 'after-tx-deletes' | 'before-tx-inserts' = 'after-tx-deletes'): SyncDatabase {
   return {
     readAll: () => db.readAll(),
     onChange: (cb) => db.onChange(cb),
     write: async (ops: Op[]) => {
-      // Split just after the LAST delete of an old transaction: the new rows are in, the old
-      // transactions are gone, the old templates / people / pay cycles (parents, deleted last) remain.
       let i = -1
-      ops.forEach((op, k) => {
-        if (op.kind === 'delete' && op.table === 'transactions') i = k + 1
-      })
+      if (at === 'after-tx-deletes') {
+        // Just after the LAST delete of an old transaction: the new rows are in, the old
+        // transactions are gone, the old templates / people / pay cycles (parents, deleted last) remain.
+        ops.forEach((op, k) => {
+          if (op.kind === 'delete' && op.table === 'transactions') i = k + 1
+        })
+      } else {
+        // Just BEFORE the first insert of a new transaction: the new parents are in, none of the
+        // file's transactions are — the window in which the reader materialises them itself.
+        i = ops.findIndex((op) => op.kind === 'insert' && op.table === 'transactions')
+      }
       if (i <= 0) return db.write(ops)
       await db.write(ops.slice(0, i))
       await onHalf()
@@ -116,7 +129,7 @@ function orphans(d: AppDataV2, among?: Set<string>): string[] {
     .map((t) => t.id)
 }
 
-async function scenario(unsafe: boolean) {
+async function scenario(unsafe: boolean, at: 'after-tx-deletes' | 'before-tx-inserts' = 'after-tx-deletes') {
   const before = household()
   const db = new FakeSyncDb()
   db.seed(toRows(before, { householdId: HH }))
@@ -134,6 +147,7 @@ async function scenario(unsafe: boolean) {
 
   let partial: AppDataV2 | null = null
   let staleInserts: string[] = []
+  let earlyInserts: string[] = [] // rows materialised for parents that had only just arrived
   let materialised = 0
   const onHalf = async () => {
     await tick(30) // B's onChange → deliver
@@ -145,17 +159,18 @@ async function scenario(unsafe: boolean) {
     b.save(settled, partial)
     await b.flush()
     staleInserts = db.log.slice(logBefore).filter((s) => s.kind === 'insert' && s.table === 'transactions' && seededTxIds.has(s.id)).map((s) => s.id)
+    earlyInserts = db.log.slice(logBefore).filter((s) => s.kind === 'insert' && s.table === 'transactions' && !seededTxIds.has(s.id)).map((s) => s.id)
   }
 
   // Device A (Adam) restores a foreign file.
   db.actingUser = ADAM
-  const a = createPowerSyncLedgerStore({ db: splitWrites(db, onHalf), householdId: HH, userId: ADAM, firstSync: Promise.resolve(), storageKey: 'kA', storage: memoryStorage(), log: silent })
+  const a = createPowerSyncLedgerStore({ db: splitWrites(db, onHalf, at), householdId: HH, userId: ADAM, firstSync: Promise.resolve(), storageKey: 'kA', storage: memoryStorage(), log: silent })
   const loaded = (await a.load())!
   a.save(parseLedgerBackupJson(raw), loaded)
   await a.flush()
   await tick(40)
   const final = deliveries[deliveries.length - 1]
-  return { before, bBefore, partial: partial!, materialised, staleInserts, final, db, seededTxIds }
+  return { before, bBefore, partial: partial!, materialised, staleInserts, earlyInserts, final, db, seededTxIds }
 }
 
 console.log('\n1. The window is real: old transactions gone, old templates and pay cycles still there')
@@ -191,6 +206,59 @@ console.log('\n4. After the restore the household holds exactly the file\'s rows
   const fileOrphans = orphans(parseLedgerBackupJson(raw)).length
   check('the only dangling references left are the file\'s own', orphans(fixed.final).length === fileOrphans, [orphans(fixed.final), fileOrphans])
   check('…and the control has MORE than that', orphans(control.final).length > fileOrphans, [orphans(control.final).length, fileOrphans])
+}
+
+/** Occurrence slots filled by more than one transaction — a bill counted twice. */
+function duplicateSlots(d: AppDataV2): string[] {
+  const seen = new Map<string, number>()
+  for (const t of d.transactions) {
+    const k = dedupeKey(t)
+    if (k) seen.set(k, (seen.get(k) ?? 0) + 1)
+  }
+  return [...seen].filter(([, n]) => n > 1).map(([k]) => k)
+}
+
+console.log('\n7. 🚨 The INSERT window: new templates arrive before the file\'s transactions do')
+{
+  const early = await scenario(false, 'before-tx-inserts')
+  check('the window is real: the half-synced snapshot holds the NEW templates with no transactions of theirs', early.partial.recurringTemplates.some((t) => !early.before.recurringTemplates.some((b) => b.id === t.id)) && early.materialised > 0, early.materialised)
+  check('the fix: Device B writes NO occurrence for a template that only just arrived', early.earlyInserts.length === 0, early.earlyInserts)
+  check('after the restore no occurrence slot is filled twice (yesterday\'s TV License / Barkin Bistro pairs)', duplicateSlots(early.final).length === 0, duplicateSlots(early.final))
+  const earlyControl = await scenario(true, 'before-tx-inserts')
+  check('CONTROL — guard off: the reader materialises occurrences for the just-arrived templates', earlyControl.earlyInserts.length > 0, earlyControl.earlyInserts.length)
+  check('…and the file\'s own rows then land on the same slots: DUPLICATES', duplicateSlots(earlyControl.final).length > 0, duplicateSlots(earlyControl.final).slice(0, 3))
+}
+
+console.log('\n8. A template that settles (present in two reads) is materialised normally')
+{
+  const before = household()
+  const db = new FakeSyncDb()
+  db.seed(toRows(before, { householdId: HH }))
+  const s = createPowerSyncLedgerStore({ db, householdId: HH, userId: ELLA, firstSync: Promise.resolve(), storageKey: 'k', storage: memoryStorage(), log: silent })
+  const got: AppDataV2[] = []
+  s.subscribe!((d) => got.push(d))
+  await tick(30)
+  // Another device adds a bill due in the past, with no occurrence rows.
+  const cur = got[got.length - 1]
+  const tpl: AppDataV2['recurringTemplates'][number] = {
+    id: 'new-bill', name: 'New bill', amount: 5, categoryId: 'category-bills', paymentMethod: 'standing_order', frequency: 'monthly',
+    anchorDate: '2026-09-20', location: 'personal', ownerId: cur.people[0].id, payee: '', payeeSharePercent: 100, active: true,
+  }
+  db.seed(toRows({ ...cur, recurringTemplates: [tpl] }, { householdId: HH }))
+  db.remoteChange('recurring_templates', 'new-bill', {})
+  await tick(30)
+  const d1 = got[got.length - 1]
+  db.clearLog()
+  s.save(autoClearDuePayments(d1, ASOF), d1)
+  await s.flush()
+  check('first read with the new template: nothing materialised for it yet', !db.log.some((x) => x.kind === 'insert' && x.table === 'transactions'), db.log.map((x) => x.id))
+  db.remoteChange('recurring_templates', 'new-bill', {}) // any later sync: it is settled now
+  await tick(30)
+  const d2 = got[got.length - 1]
+  db.clearLog()
+  s.save(autoClearDuePayments(d2, ASOF), d2)
+  await s.flush()
+  check('next read: its due occurrences are materialised as normal', db.log.some((x) => x.kind === 'insert' && x.table === 'transactions' && x.id.includes('new-bill')), db.log.map((x) => x.id).slice(0, 3))
 }
 
 console.log("\n5. This device's own deletes are not mistaken for remote ones")

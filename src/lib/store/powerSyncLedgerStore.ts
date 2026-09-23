@@ -306,6 +306,8 @@ export interface PowerSyncLedgerStoreOptions {
   log?: Pick<Console, 'error' | 'warn' | 'info'>
   /** TESTS ONLY: the control for verify-stale-writes-during-restore.ts. Never set in the app. */
   unsafeRecreateRemotelyDeleted?: boolean
+  /** Coalesce change events for this long before re-reading (PROMPT-16 Part G). The app passes 400; checks leave it 0. */
+  deliveryDebounceMs?: number
 }
 
 export interface PowerSyncLedgerStore extends LedgerStore, IdentityView {
@@ -370,6 +372,16 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
   // auto-clearing pass regenerates a missing slot under an `auto:` id even when the row it replaces
   // had a hand-logged id, so matching on the id alone misses most of the damage.
   const remotelyDeletedSlots = new Set<string>()
+  // …and the other half of the same window: PARENT rows (people, templates, loans, pots, cards,
+  // pensions) that arrived from the server in the LATEST read and were not there before. A restore
+  // inserts parents before transactions (TABLE_ORDER), so for a moment the other device sees new
+  // templates with no occurrences and materialises them — and then the file's own rows arrive for
+  // the same slots. A derived transaction insert that points at a just-arrived parent is dropped;
+  // the parent counts as settled from the next read on. Rows this device inserted itself are not
+  // "just arrived".
+  const PARENT_TABLES = ['people', 'recurring_templates', 'loans', 'pots', 'savings_pots', 'credit_cards', 'pensions'] as const
+  const newParents = new Set<string>()
+  const ownInserts = new Set<string>()
   let pendingTap: string | null = null // setPrimaryPerson(id): the next save carrying this id IS "Set as me"
   const shownKey = `${storageKey}:shown` // PROMPT-16 Part F: who this device last showed, by choice or link
   const knownLists = new WeakSet<object>() // every list the store has delivered, loaded or saved (isImport)
@@ -439,8 +451,14 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
     linkedTo.clear()
     for (const r of rows.people ?? []) if (typeof r.linked_user_id === 'string' && r.linked_user_id) linkedTo.set(r.id, r.linked_user_id)
     const lastTx = new Map((lastDelivered ?? shadow)?.transactions.map((t) => [t.id, t]) ?? [])
+    const firstRead = wasPresent.size === 0
+    newParents.clear()
     for (const [table, list] of Object.entries(rows)) {
       const now = new Set(list.map((r) => r.id))
+      if (!firstRead && (PARENT_TABLES as readonly string[]).includes(table)) {
+        const before = wasPresent.get(table) ?? new Set<string>()
+        for (const id of now) if (!before.has(id) && !ownInserts.has(rowKey(table, id))) newParents.add(id)
+      }
       for (const id of wasPresent.get(table) ?? []) {
         if (now.has(id)) continue
         const key = rowKey(table, id)
@@ -632,10 +650,22 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
         let droppedRows: Map<string, Set<string>> | null = null
         if (!setDataCall && !opts.unsafeRecreateRemotelyDeleted) {
           const kept: Op[] = []
-          const slotOf = new Map(target.transactions.map((t) => [t.id, dedupeKey(t)]))
-          const refillsDeletedSlot = (op: Op) => op.kind === 'insert' && op.table === 'transactions' && remotelyDeletedSlots.has(slotOf.get(op.row.id) ?? '')
+          const txById = new Map(target.transactions.map((t) => [t.id, t]))
+          const refillsDeletedSlot = (op: Op) => {
+            if (op.kind !== 'insert' || op.table !== 'transactions') return false
+            const t = txById.get(op.row.id)
+            const slot = t ? dedupeKey(t) : null
+            return slot !== null && remotelyDeletedSlots.has(slot)
+          }
+          const pointsAtNewParent = (op: Op) => {
+            if (op.kind !== 'insert' || op.table !== 'transactions' || newParents.size === 0) return false
+            const t = txById.get(op.row.id)
+            if (!t) return false
+            const refs = [t.ownerId, t.personId, t.payee, t.sourceId, t.potId, t.savingsPotId, t.creditCardId]
+            return refs.some((id) => id && newParents.has(id))
+          }
           for (const op of ops) {
-            if (op.kind === 'insert' && (remotelyDeleted.has(rowKey(op.table, op.row.id)) || refillsDeletedSlot(op))) {
+            if (op.kind === 'insert' && (remotelyDeleted.has(rowKey(op.table, op.row.id)) || refillsDeletedSlot(op) || pointsAtNewParent(op))) {
               droppedRows ??= new Map()
               ;(droppedRows.get(op.table) ?? droppedRows.set(op.table, new Set()).get(op.table)!).add(op.row.id)
             } else kept.push(op)
@@ -649,6 +679,7 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
         for (const op of ops) {
           if (op.kind === 'insert') {
             ;(present.get(op.table) ?? present.set(op.table, new Set()).get(op.table)!).add(op.row.id)
+            ownInserts.add(rowKey(op.table, op.row.id))
             remotelyDeleted.delete(rowKey(op.table, op.row.id)) // an explicit restore may legitimately bring one back
             if (op.table === 'transactions') {
               const t = target.transactions.find((x) => x.id === op.row.id)
@@ -708,9 +739,24 @@ export function createPowerSyncLedgerStore(opts: PowerSyncLedgerStoreOptions): P
         nextDeliveryWholesale = false
         onExternalChange(data, wholesale)
       }
-      const unsubscribe = db.onChange(() => void deliver())
+      // Part G: a restore arrives as a burst of commits. Coalescing change
+      // events for a moment reads them as one state instead of several
+      // partial ones (the app's own writes are already in React state, so
+      // the delay is invisible). 0 in checks, which time their ticks.
+      const debounce = opts.deliveryDebounceMs ?? 0
+      let timer: ReturnType<typeof setTimeout> | null = null
+      const schedule = () => {
+        if (debounce <= 0) return void deliver()
+        if (timer) clearTimeout(timer)
+        timer = setTimeout(() => {
+          timer = null
+          void deliver()
+        }, debounce)
+      }
+      const unsubscribe = db.onChange(schedule)
       void deliver() // the first, wholesale delivery (3.3b)
       return () => {
+        if (timer) clearTimeout(timer)
         cancelled = true
         unsubscribe()
       }
