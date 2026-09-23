@@ -10,6 +10,12 @@ live app.
 The two never overlap: test-app tooling never goes in `DIVERGENCE.md`, and live-app divergence never
 goes here.
 
+📍 **`BUILD-PLAN` is not in this repo.** This file and eight source files here cite phases by number
+(`BUILD-PLAN 3.3a`, `4.4`, `4.5`, `Phase 1`, `Phase 7`). They all mean
+**`shared-finance-ledger/docs/BUILD-PLAN.md`** — one copy, deliberately, for all three ledger repos.
+It is the phase register and the standing-risks index; **never renumber a phase**, because about 22
+files across the three repos cite these numbers from code comments that cannot be kept in sync.
+
 ---
 
 ## How the test app works
