@@ -2,6 +2,7 @@ import { addMonths, differenceInCalendarMonths } from 'date-fns'
 import type { AppData, Bill, Loan, Scenario, ScenarioTargetKind } from '../types/models'
 import type { CreditCard, RecurringTemplate } from '../types/ledger'
 import { summarizeLoan, currentLoanMonthlyCost, estimateSettlementFigure, simulateScenarioLoan, scheduleEntryAsOf, baselineLoanSchedule, type ScenarioLoanEvent } from './loans'
+import type { LoanScheduleEntry } from './ledgerLoans'
 import { computeMinimumPaymentAmount, simulateCardPayoffMonths } from './creditCards'
 import { costForPerson } from './bills'
 import { calculateNetSalary } from './tax'
@@ -1037,6 +1038,26 @@ function buildDebtImpacts(
     // `date`. The payment is read a month AFTER the section's own date: at
     // the date itself a lump sum still sits in overpaymentApplied, which is
     // a one-off, not the ongoing monthly cost.
+    // What is owed ON `date`. scheduleEntryAsOf() finds the next entry
+    // at-or-AFTER the date, which is right once the loan is running (a lump
+    // lands in its payment PERIOD, whose entry may be dated either side of the
+    // lump itself, and that entry is where its effect shows). It is wrong in
+    // exactly one place: a date BEFORE the first instalment, where it returns
+    // the balance after a payment that has not happened. Adam, 2026-09-23: a
+    // £10,050 loan whose first payment was not due until 2026-10-01 read as
+    // £9,906.51 on 23 September. Before the schedule starts, nothing has
+    // fallen due, so the balance is the opening balance less any lump already
+    // paid. Everything from the first instalment on is untouched — narrowing
+    // it to this window is deliberate: a previous attempt replaced the lookup
+    // wholesale and silently missed lumps (verify-scenario-debt-sections).
+    const balanceOn = (sched: LoanScheduleEntry[], date: string, subset: DebtAction[]) => {
+      if (sched.length === 0 || date < sched[0].date) {
+        const paid = subset.filter((a) => a.date <= date).reduce((sum, a) => sum + (a.lumpSum ?? 0), 0)
+        return round2(Math.max(0, original.remaining - paid))
+      }
+      return round2(Math.max(0, scheduleEntryAsOf(sched, date)?.balanceAfter ?? original.remaining))
+    }
+
     const stateAt = (subset: DebtAction[], date: string) => {
       // With nothing applied yet, the loan still runs down on its own, so
       // "before" reads the untouched schedule at that date — not today's
@@ -1085,23 +1106,36 @@ function buildDebtImpacts(
         // unchanged). With events, fall back to the arithmetic above rather
         // than reporting the loan untouched.
         if (subset.length > 0) return noScheduleState()
-        const atBaseline = scheduleEntryAsOf(schedule, date)
         return {
-          balance: round2(Math.max(0, atBaseline?.balanceAfter ?? original.remaining)),
+          balance: balanceOn(schedule, date, subset),
           payment: currentLoanMonthlyCost(loan),
           finishDate: original.finalPaymentDate,
           monthsRemaining: original.monthsRemaining,
           fullyPaidOff: false,
         }
       }
-      const atDate = scheduleEntryAsOf(outcome.schedule, date)
       const nextPeriod = scheduleEntryAsOf(outcome.schedule, toLocalIsoDate(addMonths(parseLocalDate(date), 1)))
       const recurringStillRunning = subset.some((a) => a.overpayment && a.date <= date)
       const payment = outcome.fullyPaidOff && (nextPeriod?.balanceAfter ?? 0) <= 0.005 ? 0 : nextPeriod ? round2(nextPeriod.scheduledPayment + (recurringStillRunning ? nextPeriod.overpaymentApplied : 0)) : 0
+      // A loan cleared by a lump finishes on the DAY THE MONEY LEFT, not at
+      // the end of the payment period the engine applied it in. Adam,
+      // 2026-09-23: a lump dated today cleared the loan, and "Finishes" read
+      // 2026-10-01 — the period the lump landed in — when the debt was gone
+      // today. Only a lump moves this; a payoff brought forward by a recurring
+      // overpayment still finishes on a real scheduled payment date.
+      const clearingLump = subset
+        .filter((a) => (a.lumpSum ?? 0) > 0 && a.date <= date)
+        .map((a) => a.date)
+        .sort()
+        .pop()
+      const finishDate =
+        outcome.fullyPaidOff && clearingLump && (outcome.finalPaymentDate == null || clearingLump < outcome.finalPaymentDate)
+          ? clearingLump
+          : outcome.finalPaymentDate
       return {
-        balance: round2(Math.max(0, atDate?.balanceAfter ?? original.remaining)),
+        balance: balanceOn(outcome.schedule, date, subset),
         payment,
-        finishDate: outcome.finalPaymentDate,
+        finishDate,
         monthsRemaining: outcome.monthsRemaining,
         fullyPaidOff: outcome.fullyPaidOff,
       }
