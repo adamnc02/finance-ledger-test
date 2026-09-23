@@ -2320,9 +2320,10 @@ type CycleRowItem = { kind: 'real'; t: Transaction; running: number } | ({ kind:
  * page's own background colour, so it reads as a cutout through the
  * fill rather than a coloured-icon-on-neutral-circle. Dashed outline +
  * italic muted label reinforce "this is an estimate, not a real entry."
- * The "Reduced from £X" caption only appears once the reduction
- * actually did something (`realSpend > 0`) — otherwise it's just noise
- * ("Reduced from £0" says nothing true).
+ * The "Reduced from £X" part of the caption only appears once the
+ * reduction actually did something (`realSpend > 0`) — otherwise it's
+ * just noise ("Reduced from £0" says nothing true). The METHOD word
+ * after it always renders.
  *
  * 2026-09-23 (Adam's Q3, PROMPT-17) — that same caption now ends in
  * "typical week" instead of "estimate" whenever the MEDIAN method
@@ -2334,6 +2335,16 @@ type CycleRowItem = { kind: 'real'; t: Transaction; running: number } | ({ kind:
  * ran, not merely "is this account eligible" — `spendForecastMethod`
  * already accounts for the £0-median fallback to the mean, so a
  * mean-derived figure never gets captioned "typical week".
+ *
+ * 🚨 2026-09-23, revised during the same UAT: the method word renders on
+ * EVERY forecast row, not only on one that has been reduced. Adam's first
+ * reaction to the original build was "I don't see it anywhere" — and he
+ * was right to be puzzled. Tying it to the `Reduced from` line meant it
+ * only ever appeared on a cycle with real spend already logged in it,
+ * which in practice is the current cycle and no other, so every FUTURE
+ * cycle — where most of the figures are — said nothing at all. A method
+ * indicator that is absent from most of the rows it describes is not an
+ * indicator.
  */
 function ProjectedSpendRow({ forecastAmount, realSpend, method, runningBalance }: { forecastAmount: number; realSpend: number; method: SpendForecastMethod; runningBalance?: number }) {
   const averagePerCycle = round2(forecastAmount + realSpend)
@@ -2346,11 +2357,10 @@ function ProjectedSpendRow({ forecastAmount, realSpend, method, runningBalance }
         <p className="text-sm italic" style={{ color: 'var(--color-ink-muted)' }}>
           Average spend forecast
         </p>
-        {realSpend > 0 && (
-          <p className="text-[11px]" style={{ color: 'var(--color-ink-faint)' }}>
-            Reduced from £{formatCurrency(averagePerCycle)} · {method === 'median' ? 'typical week' : 'estimate'}
-          </p>
-        )}
+        <p className="text-[11px]" style={{ color: 'var(--color-ink-faint)' }}>
+          {realSpend > 0 && `Reduced from £${formatCurrency(averagePerCycle)} · `}
+          {method === 'median' ? 'typical week' : 'estimate'}
+        </p>
       </div>
       <div className="text-right shrink-0">
         <span className="text-sm font-mono font-semibold" style={{ color: 'var(--color-ink-muted)' }}>
