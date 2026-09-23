@@ -1045,10 +1045,46 @@ function buildDebtImpacts(
       // in between, so a £3,000 lump looked like £4,040).
       const outcome = subset.length > 0 ? simulateScenarioLoan(loan, eventsFor(subset)) : null
       const schedule = outcome?.hasSchedule ? outcome.schedule : baselineLoanSchedule(loan)
-      if (schedule.length === 0) {
-        return { balance: original.remaining, payment: currentLoanMonthlyCost(loan), finishDate: original.finalPaymentDate, monthsRemaining: original.monthsRemaining, fullyPaidOff: false }
+
+      // BUGFIX 2026-09-23: an UNCALIBRATED loan (no `calibratedMonthlyRate` —
+      // i.e. "Calibrate interest" has never produced a CONFIDENT fit, which is
+      // the normal state of a hand-entered loan, whatever its real rate; a loan
+      // calibrated to 0 is NOT this) has no amortisation schedule at all — `simulateScenarioLoan` and
+      // `baselineLoanSchedule` both come back empty, so the two branches
+      // below used to return `currentLoanMonthlyCost(loan)`: the loan's
+      // ORIGINAL payment, with the lump sum ignored. "before" and "after"
+      // were then identical and `monthlyCashChange` was always 0 — clearing
+      // such a loan showed no monthly benefit whatever, and the same for a
+      // recurring overpayment against it. CALIBRATED loans were unaffected,
+      // which is why it went unnoticed — mum's two loans are calibrated;
+      // Adam's live Monzo loan (£195/mo) was not. Apply the events
+      // arithmetically instead; with an empty `subset` this is identical to
+      // the old behaviour, so the "before" reading does not move.
+      const noScheduleState = () => {
+        const upTo = subset.filter((a) => a.date <= date)
+        const lumpTotal = round2(upTo.reduce((sum, a) => sum + (a.lumpSum ?? 0), 0))
+        const overpayment = round2(upTo.reduce((sum, a) => sum + (a.overpayment ?? 0), 0))
+        const balance = round2(Math.max(0, original.remaining - lumpTotal))
+        const fullyPaidOff = balance <= 0.005
+        // Mirrors currentLoanMonthlyCost's own rule: you never pay more in a
+        // month than is still owed.
+        const payment = fullyPaidOff ? 0 : round2(Math.min(loan.monthlyPayment + overpayment, balance))
+        return {
+          balance,
+          payment,
+          finishDate: fullyPaidOff ? null : original.finalPaymentDate,
+          monthsRemaining: fullyPaidOff ? 0 : payment > 0 ? Math.ceil(balance / payment) : original.monthsRemaining,
+          fullyPaidOff,
+        }
       }
+
+      if (schedule.length === 0) return noScheduleState()
       if (!outcome?.hasSchedule) {
+        // A baseline schedule exists but this subset produced none. With no
+        // events that is just the untouched run-down (the "before" reading,
+        // unchanged). With events, fall back to the arithmetic above rather
+        // than reporting the loan untouched.
+        if (subset.length > 0) return noScheduleState()
         const atBaseline = scheduleEntryAsOf(schedule, date)
         return {
           balance: round2(Math.max(0, atBaseline?.balanceAfter ?? original.remaining)),
