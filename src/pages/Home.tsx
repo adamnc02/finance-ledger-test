@@ -5,6 +5,7 @@ import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
 import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PieChart, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, inCycleWindow, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
+import { buildCycleForecastChain } from '../lib/cycleForecastChain'
 import { averageAdHocSpendForCycle, daysOfSpendHistory, forecastSpendForCycle, hasAnyMatchingSpend, hasSpendHistory, MIN_SPEND_HISTORY_DAYS, spendForecastMethod, type SpendForecastMethod, type SpendScope } from '../lib/averageSpendForecast'
 import { summarizeLoanProgress, summarizeLoan } from '../lib/ledgerLoans'
 import { computeJointSummary, buildJointPersonGroups, type JointPersonGroup } from '../lib/jointLedger'
@@ -2505,10 +2506,20 @@ function CycleGroupedList({
     return { t, running }
   })
 
-  let carried = openingRunningBalance
+  // 2026-09-23 — the closing-balance chain lives in lib now so a verify
+  // script can hold it. See cycleForecastChain.ts's own header for the bug
+  // it exists to prevent: the forecasts did not carry forward at all, and on
+  // a real ledger the hero and this list disagreed by thousands.
+  const chain = buildCycleForecastChain(
+    withRunning.map(({ t, running }) => ({ date: t.date, running })),
+    cycles.map((c) => ({ startIso: toLocalIsoDate(c.start), endIso: toLocalIsoDate(c.end) })),
+    (startIso) => forecastByCycle?.get(startIso)?.forecastAmount ?? 0,
+    openingRunningBalance,
+  )
   const sections = cycles.map((cycle, i) => {
     const startIso = toLocalIsoDate(cycle.start)
     const endIso = toLocalIsoDate(cycle.end)
+    const { closing, priorForecasts } = chain[i]
     // Every section, INCLUDING the first/current one, is bounded on both
     // ends by its own cycle window for DISPLAY purposes — a stored
     // transaction dated before the current cycle's start (but after the
@@ -2519,25 +2530,23 @@ function CycleGroupedList({
     // been since the account was last rebalanced). Its effect on the
     // BALANCE is still fully accounted for below via `upToEnd`, which
     // isn't lower-bounded — only the rendered row list is.
-    const rows = withRunning.filter(({ t }) => t.date >= startIso && t.date <= endIso)
-    // Balance carried OUT of this cycle — the running figure of the LAST
-    // transaction dated on/before this cycle's end, cumulative across the
-    // whole window regardless of this section's own display bound (so an
-    // empty-looking current cycle still correctly reflects older history
-    // that landed between the opening balance date and its own start),
-    // or, if there's no transaction at all yet, whatever came in from the
-    // cycle before.
-    const upToEnd = withRunning.filter(({ t }) => t.date <= endIso)
-    const realClosing = upToEnd.length > 0 ? upToEnd[upToEnd.length - 1].running : carried
-    // 2026-09-13 (average spend forecast) — a forecast row for this
-    // cycle (if any) reduces its closing balance by its own forecast
-    // amount, same as a real expense would — and that ADJUSTED figure
-    // is what carries forward into every later cycle's own opening
-    // point, so the projected balance genuinely reflects it rather than
-    // being a purely cosmetic row.
+    // Offset by every EARLIER cycle's forecast, so a cycle's own last row
+    // minus its own forecast row really is its closing balance — the sum a
+    // person does by eye.
+    const rows = withRunning.filter(({ t }) => t.date >= startIso && t.date <= endIso).map(({ t, running }) => ({ t, running: round2(running - priorForecasts) }))
+    // `closing` above is the balance carried OUT of this cycle — the running
+    // figure of the LAST row dated on/before this cycle's end, cumulative
+    // across the whole window regardless of this section's own display bound
+    // (so an empty-looking current cycle still reflects older history that
+    // landed between the opening balance date and its own start), or, with no
+    // row at all yet, whatever came in from the cycle before. That lower-bound
+    // independence is why the chain takes the WHOLE fold, not this cycle's
+    // rows.
+    // 2026-09-13 (average spend forecast) — a forecast row for this cycle
+    // (if any) reduces its closing balance by its own forecast amount, same
+    // as a real expense would, and that ADJUSTED figure carries forward into
+    // every later cycle's own opening point (buildCycleForecastChain).
     const forecast = forecastByCycle?.get(startIso)
-    const closing = forecast ? round2(realClosing - forecast.forecastAmount) : realClosing
-    carried = closing
     // Respects the "Show cleared" toggle — computed here, AFTER `closing`
     // above already folded every row (cleared included), so this can
     // never change the balance figures, only which rows render.
