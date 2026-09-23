@@ -25,7 +25,7 @@
 import type { AppData, Bill as LegacyBill, Loan as LegacyLoan, Person as LegacyPerson } from '../types/models'
 import type { AppDataV2, RecurringTemplate } from '../types/ledger'
 import { findApplicableSnapshot } from './salaryLedger'
-import { summarizeLoan as summarizeLedgerLoan, resolveLoanRateAndConvention } from './ledgerLoans'
+import { summarizeLoan as summarizeLedgerLoan, resolveLoanRateAndConvention, buildLoanSchedule } from './ledgerLoans'
 import { computeMinimumPaymentAmount, withLiveBalances } from './creditCards'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -81,7 +81,11 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
         name: template.name,
         cost: monthlyEquivalentCost(template),
         dueDay: parseLocalDate(template.anchorDate).getDate(),
-        location: template.location,
+        // Same 'pot' -> 'personal' normalisation as the loans below, and for
+        // the same reason: costForPerson() has no 'pot' branch, so a
+        // pot-funded bill silently costs its owner £0. Adam's Gym, GiffGaff,
+        // Monzo Perks and Windscribe are all pot-funded.
+        location: template.location === 'pot' ? 'personal' : template.location,
         payee: template.payee,
         payeeSharePercent: template.payeeSharePercent,
         category: category?.name ?? 'Other',
@@ -130,13 +134,34 @@ export function buildLegacyAppData(ledgerData: AppDataV2, asOf: Date = new Date(
   const loans: LegacyLoan[] = ledgerData.loans.filter((loan) => loan.active).map((loan) => {
     const summary = summarizeLedgerLoan(loan, asOf)
     const { monthlyRate, convention } = resolveLoanRateAndConvention(loan)
+    // 🚨 The first payment is the next one genuinely DUE, not today.
+    // `totalAmount` is already the balance as of today, and summarizeLoan()
+    // treats a payment dated on its as-of date as ALREADY MADE — so dating
+    // the schedule from today silently knocked one whole instalment off the
+    // balance every What-if page showed. Adam reported it 2026-09-23: a
+    // £10,050 Monzo loan that has not had a single payment yet (first due
+    // 2026-10-01) read as £9,906.51 here, while the loan card, the pie charts
+    // and the Borrowing form all correctly showed £10,050. The difference was
+    // exactly one payment's capital: 195 − 51.51 interest = 143.49.
+    // Falls back to today only for a loan with nothing left to pay.
+    const nextDueIso = buildLoanSchedule(loan).find((e) => e.date > asOfIso)?.date ?? asOfIso
     return {
       id: loan.id,
       name: loan.name,
-      firstPaymentDate: asOfIso,
+      firstPaymentDate: nextDueIso,
       totalAmount: summary.remainingBalance,
       monthlyPayment: loan.monthlyPayment,
-      location: loan.location,
+      // 🚨 'pot' must become 'personal' here. costForPerson() knows only
+      // 'personal' and the joint split — a 'pot' location falls through to the
+      // joint branch, where a pot-funded loan's payee '' + 100% share yields
+      // £0, so the loan contributed NOTHING to any monthly total (Adam
+      // reported it 2026-09-23: the What-if card correctly showed £195 -> £0,
+      // while "Impact on available cash" stayed blank). ledgerLoans.ts already
+      // does exactly this in two places, for the stated reason that a
+      // pot-funded expense "can't be split at all"; the bridge was the one
+      // place that copied the location verbatim. A 'joint' loan is untouched:
+      // it IS a real, splittable expense.
+      location: loan.location === 'pot' ? 'personal' : loan.location,
       ownerId: loan.ownerId,
       payee: loan.payee,
       payeeSharePercent: loan.payeeSharePercent,

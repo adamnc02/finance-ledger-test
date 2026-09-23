@@ -1,3 +1,4 @@
+import { costForPerson } from '../src/lib/bills'
 import { buildLegacyAppData } from '../src/lib/legacyBridge'
 import { summarizeLoan as summarizeLegacyLoan } from '../src/lib/loans'
 import { summarizeLoan as summarizeLedgerLoan } from '../src/lib/ledgerLoans'
@@ -137,24 +138,68 @@ const ledgerSummary = summarizeLedgerLoan(carLoan, asOf)
 const adaptedLoan = legacy.loans.find((l) => l.id === 'car-loan')
 check("Adapted loan's totalAmount equals the REMAINING balance (not the original £3000 nominal total)", adaptedLoan?.totalAmount, ledgerSummary.remainingBalance)
 check('Adapted loan totalAmount is meaningfully less than the £3000 nominal total (overpayments genuinely reduced it)', (adaptedLoan?.totalAmount ?? 0) < 3000, true)
+// CHANGED 2026-09-23 (Adam-reported). This used to assert firstPaymentDate
+// === today, and §5 below tolerated the consequence: the old engine counts a
+// payment dated exactly "today" as already made, so the bridged loan read one
+// whole instalment lighter than the ledger's own figure. That tolerance was a
+// user-visible wrong number — a £10,050 loan whose first payment was not due
+// for another week showed as £9,906.51 on the What-if page, while the loan
+// card, the pie charts and the Borrowing form all showed £10,050. The bridge
+// now dates the schedule from the next payment genuinely DUE, so the as-of
+// balance matches the rest of the app exactly rather than within a payment.
 check(
-  "Adapted loan's firstPaymentDate is \"today\" (the schedule restarts from the real remaining balance, not the original start date)",
+  "Adapted loan's firstPaymentDate is the next payment genuinely DUE, not today (so the as-of balance is not a payment light)",
   adaptedLoan?.firstPaymentDate,
-  '2026-06-01',
+  '2026-06-15',
 )
 
 // ---- 5. The OLD loan engine, fed the adapted loan, computes a sane remaining schedule ----
-// Not an exact equality: the old engine treats a payment dated exactly
-// "today" as already made (inclusive date <= today), which is real,
-// pre-existing behaviour in lib/loans.ts, not something this adapter
-// should paper over. So remaining should be within one monthly payment
-// of the adapted totalAmount, not necessarily identical to it.
+// lib/loans.ts still treats a payment dated exactly "today" as already made
+// (inclusive date <= today) — that is unchanged. What changed on 2026-09-23 is
+// that the bridge no longer HANDS it a payment dated today, so the two figures
+// should now agree EXACTLY. The <= one-payment bound is kept as the assertion
+// (a tighter equality check follows it) so this check keeps its original
+// meaning if the dating ever regresses.
 const legacySummary = summarizeLegacyLoan(adaptedLoan!, asOf)
 check(
-  "Old engine's remaining balance is within one payment of the adapted totalAmount (accounts for the same-day-payment edge case, not a full month adrift)",
+  "Old engine's remaining balance is within one payment of the adapted totalAmount",
   Math.abs((adaptedLoan?.totalAmount ?? 0) - legacySummary.remaining) <= carLoan.monthlyPayment,
   true,
 )
+// The point of the dating fix: not "close", but the same number the rest of
+// the app shows. This is the check that would have caught Adam's £9,906.51.
+check(
+  "Old engine's remaining balance now equals the adapted totalAmount EXACTLY (no phantom payment)",
+  legacySummary.remaining,
+  adaptedLoan?.totalAmount,
+)
+
+// ---- 5b. REGRESSION 2026-09-23: a POT-funded loan or bill must not cost its owner £0 ----
+// costForPerson() understands only 'personal' and the joint split. A 'pot'
+// location fell through to the joint branch, where a pot-funded item's
+// payee '' + 100% share computes a remainder of £0 — so the item contributed
+// NOTHING to any monthly total. Adam reported it on the What-if page: the card
+// correctly showed his £195 Monzo loan going £195 -> £0, while "Impact on
+// available cash" stayed blank. ledgerLoans.ts already normalises pot ->
+// personal in two places ("a pot-funded one can't be split at all"); the
+// bridge was the one place copying the location verbatim.
+{
+  const potLoan: Loan = { ...carLoan, id: 'pot-loan', location: 'pot', potId: 'bills-pot', payee: '', payeeSharePercent: 100 }
+  const potData = { ...ledgerData, loans: [...ledgerData.loans, potLoan] }
+  const bridged = buildLegacyAppData(potData, asOf)
+  const bl = bridged.loans.find((l) => l.id === 'pot-loan')
+  check('A pot-funded loan is bridged as personal, not left as a pot the split cannot handle', bl?.location, 'personal')
+  check('...and its owner is preserved', bl?.ownerId, 'me')
+  check(
+    'A pot-funded loan costs its OWNER its full monthly payment, not £0',
+    costForPerson({ ...(bl as never as { location: string }), cost: 250 } as never, 'me', bridged.people),
+    250,
+  )
+  // Control: a JOINT loan must be untouched — it IS a real, splittable expense.
+  const jointLoan: Loan = { ...carLoan, id: 'joint-loan', location: 'joint', ownerId: '', payee: 'me', payeeSharePercent: 50 }
+  const jb = buildLegacyAppData({ ...ledgerData, loans: [...ledgerData.loans, jointLoan] }, asOf).loans.find((l) => l.id === 'joint-loan')
+  check('CONTROL: a joint loan keeps its joint location', jb?.location, 'joint')
+}
 
 // ---- 6. The scenario engine itself runs end-to-end against bridged data without throwing, and produces a sane result ----
 const impact = calculateScenarioImpact(testScenario, legacy, 'me', 0)
