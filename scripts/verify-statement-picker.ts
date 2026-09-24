@@ -68,12 +68,31 @@ const currentIndex = cycles.findIndex((c) => c.current)
   assert('the constant is genuinely being read, not a coincidence of the number 4', horizon.length === THREE_CYCLES_AHEAD + 1)
 }
 
-// ── E3.5 — the floor is listed and disabled, never silently omitted ────
+// ── An empty cycle is not offered at all ───────────────────────────────
+// 🚨 This REVERSES PROMPT-18 E3.5 (listed-but-disabled). Adam,
+// 2026-09-24, having seen it in the first UAT round: a row of greyed
+// "no data" cycles is clutter, not an explanation. The assertions below
+// are the reversal made enforceable, so a later session restoring the old
+// behaviour fails here rather than quietly shipping.
 {
-  assert('cycles entirely before the reconciliation point are listed', cycles.some((c) => !c.available))
-  assert('every unavailable cycle ends before the floor', cycles.filter((c) => !c.available).every((c) => c.end < earliest))
-  assert('every available cycle reaches the floor or later', cycles.filter((c) => c.available).every((c) => c.end >= earliest))
-  assert('the list reaches back further than the floor, so there is something to disable', cycles[0].start < earliest)
+  assert('no cycle that ends before the reconciliation point is offered', cycles.every((c) => c.end >= earliest))
+  // The shared fixture's floor falls exactly on a cycle START (payday is
+  // the 14th, the floor is the 14th), so nothing straddles it and nothing
+  // is partial. That is the ordinary case and it is asserted as such.
+  check('a floor landing exactly on a cycle start leaves nothing partial', cycles.filter((c) => c.partial).length, 0)
+  check('and the list then begins exactly at the floor', cycles[0].start, earliest)
+
+  // 🚨 The straddling case gets its own fixture, because real data will
+  // have one: an opening balance reconciled MID-CYCLE. That cycle holds
+  // rows from the floor onward, so it is offered — and flagged, so a
+  // half-empty first cycle is not passed off as a whole one.
+  const midCycleFloor = '2026-09-20'
+  const straddled = offerableCycles(data, personId, ASOF, midCycleFloor)
+  check('a mid-cycle floor leaves exactly one partial cycle', straddled.filter((c) => c.partial).length, 1)
+  assert('that cycle starts before the floor and ends after it', straddled[0].start < midCycleFloor && straddled[0].end >= midCycleFloor)
+  assert('it is the earliest one offered — nothing emptier is listed', straddled.every((c) => c.end >= midCycleFloor))
+  assert('every other offered cycle starts at or after the floor', straddled.filter((c) => !c.partial).every((c) => c.start >= midCycleFloor))
+  check('and the straddling cycle keeps its REAL bounds, not bounds trimmed to the floor', straddled[0].start, cycles.find((c) => c.end >= midCycleFloor)!.start)
 }
 
 // ── The window the picker promises is the window the payload carries ───
@@ -120,11 +139,13 @@ const currentIndex = cycles.findIndex((c) => c.current)
   }
   const withEarlyFloor = offerableCycles(data, personId, ASOF, '2025-01-01')
   const withLateFloor = offerableCycles(later, personId, ASOF, '2026-09-14')
-  assert('CONTROL: moving the floor forward reduces how many cycles are selectable', withLateFloor.filter((c) => c.available).length < withEarlyFloor.filter((c) => c.available).length)
-  assert('CONTROL: with the floor at the very start, nothing is disabled', withEarlyFloor.every((c) => c.available))
-  // And the cycle bounds themselves are untouched by the floor — the
-  // floor decides what is OFFERED, never where a cycle begins.
-  check('CONTROL: the floor changes availability, never a cycle bound', withLateFloor.map((c) => c.start), withEarlyFloor.map((c) => c.start))
+  assert('CONTROL: moving the floor forward genuinely shortens the offered list', withLateFloor.length < withEarlyFloor.length)
+  assert('CONTROL: an early floor offers cycles the late floor does not', withEarlyFloor.some((c) => c.end < '2026-09-14'))
+  // The floor decides WHERE THE LIST STARTS, never where a cycle begins:
+  // every cycle the two lists share must have identical bounds.
+  const shared = withLateFloor.filter((l) => withEarlyFloor.some((e) => e.start === l.start))
+  check('CONTROL: the floor changes the list, never a cycle bound', shared.map((c) => c.end), shared.map((l) => withEarlyFloor.find((e) => e.start === l.start)!.end))
+  assert('CONTROL: and the shared portion is not empty, so the check above is not vacuous', shared.length > 0)
 }
 
 // ── E6.3 — one cycle walker, not two ───────────────────────────────────

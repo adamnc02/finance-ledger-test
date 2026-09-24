@@ -44,8 +44,8 @@ export interface OfferableCycle {
   start: string
   end: string
   label: string
-  /** False for a cycle entirely before `payCycle.openingBalanceDate` — listed, but disabled. */
-  available: boolean
+  /** True for the one cycle that STRADDLES `payCycle.openingBalanceDate` — it holds rows, but only from the floor onward. Tagged, because silently offering a half-empty cycle is the same class of problem as silently omitting one. */
+  partial: boolean
   current: boolean
   future: boolean
 }
@@ -59,9 +59,17 @@ export interface OfferableCycle {
  * two answers about where a cycle starts cannot be told apart from the
  * screen (E6.3).
  *
- * 🚨 Cycles before the reconciliation floor are LISTED AND DISABLED, not
- * omitted (E3.5). A list that simply starts later looks like a bug;
- * offering and explaining does not.
+ * 🚨 Cycles with NO data are not offered at all.
+ *
+ * This REVERSES PROMPT-18 E3.5, which had them listed-but-disabled on the
+ * reasoning that "a list that simply starts later looks like a bug".
+ * Adam, 2026-09-24, first UAT round, having seen it: a row of greyed
+ * "no data" cycles is clutter, not an explanation. **Do not restore
+ * them** — this is the later decision, made against the real screen.
+ *
+ * The one cycle that STRADDLES the floor is kept, because it genuinely
+ * holds rows, and flagged `partial` so a half-empty first cycle is not
+ * passed off as a whole one.
  */
 export function offerableCycles(data: AppDataV2, personId: string, asOfDate: Date, earliestAvailable: string): OfferableCycle[] {
   const todayIso = iso(asOfDate)
@@ -79,22 +87,22 @@ export function offerableCycles(data: AppDataV2, personId: string, asOfDate: Dat
       return true
     })
     .sort((a, b) => iso(a.start).localeCompare(iso(b.start)))
+    // A cycle that ends before the reconciliation point holds nothing at
+    // all, and is not offered.
+    .filter((c) => iso(c.end) >= earliestAvailable)
     .map((c) => ({
       start: iso(c.start),
       end: iso(c.end),
       label: cycleLabel(c.start, c.end),
-      // A cycle is available when any part of it is at or after the
-      // reconciliation point — a cycle that STRADDLES the floor still
-      // holds rows, and the statement clamps within it.
-      available: iso(c.end) >= earliestAvailable,
+      partial: iso(c.start) < earliestAvailable,
       current: iso(c.start) <= todayIso && todayIso <= iso(c.end),
       future: iso(c.start) > todayIso,
     }))
 }
 
 function tagFor(c: OfferableCycle): string {
-  if (!c.available) return 'no data'
   if (c.current) return 'this cycle'
+  if (c.partial) return 'partial'
   if (c.future) return 'ahead'
   return ''
 }
@@ -179,7 +187,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
     // 🚨 An impossible window is never OFFERED (E3.4) — the invalid rows
     // are disabled as the other end moves, rather than being accepted and
     // then complained about.
-    const blocked = !c.available || (which === 'to' && index < fromIndex) || (which === 'from' && index > toIndex)
+    const blocked = (which === 'to' && index < fromIndex) || (which === 'from' && index > toIndex)
     const tag = tagFor(c) || (blocked && which === 'to' ? 'before start' : '')
     return (
       <button
@@ -213,9 +221,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
     // native control, not a caption beside it.
     return (
       <div className="flex gap-1.5 overflow-x-auto pb-1">
-        {cycles
-          .filter((c) => c.available)
-          .map((c) => {
+        {cycles.map((c) => {
             const value = which === 'start' ? c.start : c.end
             const lit = which === 'start' ? exactStart === value : exactEnd === value
             return (
