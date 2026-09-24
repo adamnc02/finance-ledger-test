@@ -6,7 +6,7 @@
 // produced by the same functions the Home page's own cards use:
 // computeProjectionToDate, computeJointAccountProjectionToDate,
 // computePotProjectionToDate, buildSavingsPotScheduleRows,
-// buildLoanCycleSections, buildCreditCardCycleSections. Re-deriving any of
+// buildLoanLedgerRows, buildCreditCardCycleSections. Re-deriving any of
 // them here would give the app two numbers, both claiming to be the
 // balance — which is worse than having no statement at all. The precedent
 // is computeProjection itself, a thin wrapper over computeProjectionToDate
@@ -23,9 +23,7 @@ import { computeProjectionToDate, cyclesInRange } from './projection'
 import { computeJointAccountProjectionToDate, jointAccountSignedAmount } from './jointAccountLedger'
 import { computePotProjectionToDate, potSignedAmount } from './potLedger'
 import { buildSavingsPotScheduleRows, savingsPotBalanceAsOf } from './savingsPotLedger'
-import { loanCyclePeriodsInRange, buildLoanCycleSections } from './loanLedger'
-import { buildLoanLedgerRows } from './ledgerLoans'
-import { summarizeLoan } from './ledgerLoans'
+import { buildLoanLedgerRows, summarizeLoan } from './ledgerLoans'
 import { creditCardCyclePeriodsInRange, buildCreditCardCycleSections, cardBalanceAsOf } from './creditCards'
 import { isLedgerTransaction, signedAmount } from './runningBalance'
 import { compareByDateSalaryFirst } from './cycleSummary'
@@ -274,11 +272,21 @@ interface CardContext {
   asOfDate: Date
 }
 
-/** A transaction-shaped row, in the shared row format. */
-function transactionRow(t: Transaction, balance: number, sign: (t: Transaction) => number, data: AppDataV2, ctx: CardContext): StatementRow {
+/**
+ * A transaction-shaped row, in the shared row format.
+ *
+ * 🚨 `id` is the row's POSITION in the card, not the transaction's own id.
+ * A generated occurrence — a bill that has not materialised yet — carries
+ * `generated:<nanoid>`, freshly random on every call, so two statements
+ * built from identical data would have had no row in common and could not
+ * be diffed against each other. The id only has to be unique within the
+ * file (the template uses it for collapse state), so position is both
+ * sufficient and stable.
+ */
+function transactionRow(t: Transaction, index: number, balance: number, sign: (t: Transaction) => number, data: AppDataV2, ctx: CardContext, cardId: string): StatementRow {
   const amount = round2(sign(t))
   return {
-    id: t.id,
+    id: `${cardId}:${index}`,
     date: t.date,
     description: transactionLabel(t, data),
     amount,
@@ -322,7 +330,7 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
         openingDate: ctx.fullRangeStart,
         balanceLabel: 'Balance',
         hasSplit: false,
-        rows: rows.map(({ row, balance }) => transactionRow(row, balance, signedAmount, data, ctx)),
+        rows: rows.map(({ row, balance }, i) => transactionRow(row, i, balance, signedAmount, data, ctx, id)),
       }
     }
 
@@ -346,7 +354,7 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
         openingDate: ctx.fullRangeStart,
         balanceLabel: 'Balance',
         hasSplit: false,
-        rows: rows.map(({ row, balance }) => transactionRow(row, balance, jointAccountSignedAmount, data, ctx)),
+        rows: rows.map(({ row, balance }, i) => transactionRow(row, i, balance, jointAccountSignedAmount, data, ctx, id)),
       }
     }
 
@@ -365,7 +373,7 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
         openingDate: ctx.fullRangeStart,
         balanceLabel: 'Pot balance',
         hasSplit: false,
-        rows: rows.map(({ row, balance }) => transactionRow(row, balance, sign, data, ctx)),
+        rows: rows.map(({ row, balance }, i) => transactionRow(row, i, balance, sign, data, ctx, id)),
       }
     }
 
@@ -415,67 +423,61 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
     case 'loan': {
       const loan = data.loans.find((l) => l.id === entry.loanId)
       if (!loan) return null
-      const periods = loanCyclePeriodsInRange(loan, ctx.windowStartDate, ctx.windowEndDate)
-      const sections = buildLoanCycleSections(loan, data.transactions, periods)
-      // 🚨 A loan's running figure folds by CAPITAL, not by cash (B12.11,
-      // T1). Paying a £171.93 instalment reduces what is owed by the
-      // capital part only; the interest is a cost, not a reduction, and
-      // folding the cash amount overstates the debt by the whole interest
-      // bill while still looking plausible.
+      // 🚨 A loan's rows are the AMORTISATION ENGINE's own ledger rows, not
+      // the loan card's transaction list.
       //
-      // The split is NOT computed here — it comes from the amortisation
-      // engine's own rows (buildLoanLedgerRows), joined by date. Anything
-      // the engine has no split for keeps `capital: null` and does not
-      // move the balance, rather than being folded by its cash amount.
-      const ledgerRows = buildLoanLedgerRows(loan)
-      const splitByDate = new Map<string, { capital: number; interest: number }[]>()
-      for (const r of ledgerRows) {
-        const list = splitByDate.get(r.date) ?? []
-        list.push({ capital: r.capital, interest: r.interest })
-        splitByDate.set(r.date, list)
-      }
-      const taken = new Map<string, number>()
-      // Owed at the day before the window opens — the engine's own figure.
-      let owed = summarizeLoan(loan, addDays(ctx.windowStartDate, -1)).remainingBalance
-      const opening = owed
-      const flat = sections
-        .flatMap((s) => s.rows)
-        .filter((t) => t.date >= ctx.fullRangeStart && t.date <= ctx.fullRangeEnd)
+      // Both were tried (2026-09-24). Folding the card's transactions by
+      // capital loses an ad-hoc overpayment entirely: the overpayment
+      // lives on the loan (`loan.overpayments`), not in
+      // `data.transactions`, so it has no transaction row to fold — and
+      // the statement closed at £4,980.30 against the engine's £4,730.30,
+      // understating the payment by the whole £250 while looking
+      // perfectly plausible. Home's own loan card survives that because
+      // its section CLOSING figure comes from the schedule; a statement
+      // that prints a balance on every row cannot.
+      //
+      // So the rows come from buildLoanLedgerRows — the same function the
+      // Loans page renders — which carries `capital`, `interest` and
+      // `balanceAfter` straight from the engine. B12.11 then holds by
+      // construction: the running figure folds by CAPITAL because nothing
+      // here folds anything at all.
+      const rows: StatementRow[] = buildLoanLedgerRows(loan)
+        .filter((r) => r.date >= ctx.fullRangeStart && r.date <= ctx.fullRangeEnd)
         .sort(byDate)
-      const rows: StatementRow[] = flat.map((t) => {
-        const index = taken.get(t.date) ?? 0
-        const split = splitByDate.get(t.date)?.[index] ?? null
-        taken.set(t.date, index + 1)
-        owed = split ? round2(Math.max(0, owed - split.capital)) : owed
-        // A loan row is money ARRIVING at the debt, so it reads positive
-        // on the loan's own card (loanSignedAmount's convention).
-        const amount = round2(t.amount)
-        return {
-          id: t.id,
-          date: t.date,
-          description: transactionLabel(t, data),
-          amount,
-          category: categoryName(t, data),
+        .map((r, i) => ({
+          id: `${id}:${i}`,
+          date: r.date,
+          description: r.type,
+          // Positive: from the loan's point of view the money is ARRIVING
+          // (loanSignedAmount's convention, and the reason the loan card's
+          // rows read positive while the personal card's read negative for
+          // the same instalment).
+          amount: round2(r.amount),
+          category: categoryName({ categoryId: loan.categoryId, type: 'loan_payment' }, data),
           kind: 'loan',
-          direction: 'in',
-          status: t.status,
-          cycle: cycleKeyFor(t.date, ctx.cycles),
-          balance: owed,
-          capital: split ? round2(split.capital) : null,
-          interest: split ? round2(split.interest) : null,
-          amountText: `£${formatCurrency(Math.abs(amount))}`,
-          balanceText: `£${formatCurrency(owed)}`,
-        }
-      })
+          direction: 'in' as const,
+          // The engine's rows carry no status of their own; "still to
+          // come" means exactly "not yet reached", which is what the
+          // band in the document draws.
+          status: (r.date <= toIso(ctx.asOfDate) ? 'cleared' : 'pending') as 'cleared' | 'pending',
+          cycle: cycleKeyFor(r.date, ctx.cycles),
+          balance: round2(r.balanceAfter),
+          capital: round2(r.capital),
+          interest: round2(r.interest),
+          amountText: `£${formatCurrency(Math.abs(r.amount))}`,
+          balanceText: `£${formatCurrency(r.balanceAfter)}`,
+        }))
       return {
         id,
         label,
         kind: 'loan',
         sub: `Loan · ${loan.name}`,
-        openingBalance: opening,
+        // Owed the day before the window opens — the engine's own figure,
+        // so the opening tile and the first row's balance agree.
+        openingBalance: summarizeLoan(loan, addDays(ctx.windowStartDate, -1)).remainingBalance,
         openingDate: ctx.fullRangeStart,
         balanceLabel: 'Owed',
-        hasSplit: rows.some((r) => r.capital !== null),
+        hasSplit: rows.some((r) => r.interest !== null && r.interest > 0),
         rows,
       }
     }
@@ -524,4 +526,48 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
     case 'household':
       return null
   }
+}
+
+// ── Rendering the file ────────────────────────────────────────────────
+//
+// Generating a statement is ONE SUBSTITUTION: the template with its
+// single `__DATA__` token replaced by the payload. There is no rendering
+// step beyond that and there must never be one — the template is the
+// artefact, reviewable in a diff, and the app's only job is to put the
+// right data inside it.
+//
+// These live here rather than in statementFile.ts so the verify scripts
+// can exercise them under `tsx`: statementFile.ts imports the template
+// with Vite's `?raw`, which only a Vite build can resolve, and a check
+// that cannot run outside the browser is not much of a check.
+
+/**
+ * 🚨 Asserted, never trusted. A template that silently stopped
+ * substituting would produce a file that throws the moment it is opened,
+ * and the failure would arrive on Adam's phone rather than in a test.
+ */
+export const STATEMENT_DATA_TOKEN = '__DATA__'
+
+/**
+ * The payload injected into the template.
+ *
+ * `JSON.stringify` output goes inside `<script type="application/json">`,
+ * so the one sequence that could break out of that tag is `</script`. It
+ * cannot appear in a JSON string unescaped, but a description someone
+ * typed could contain it, so it is escaped here rather than assumed away:
+ * `<` becomes `\u003c`, which JSON.parse reads back identically.
+ */
+export function renderStatementHtml(payload: StatementPayload, template: string): string {
+  if (!template.includes(STATEMENT_DATA_TOKEN)) {
+    throw new Error('The statement template has no __DATA__ token — nothing would be substituted.')
+  }
+  const json = JSON.stringify(payload).replace(/</g, '\\u003c')
+  // The function form of `replace` passes the JSON through untouched —
+  // the string form would interpret `$&` and friends inside it.
+  return template.replace(STATEMENT_DATA_TOKEN, () => json)
+}
+
+/** `finance-ledger-statement-2026-09-14-to-2026-11-13.html` — the window is in the name, so two saved statements never look alike. */
+export function statementFilename(payload: StatementPayload): string {
+  return `finance-ledger-statement-${payload.meta.selectedStart}-to-${payload.meta.selectedEnd}.html`
 }

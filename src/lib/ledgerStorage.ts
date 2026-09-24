@@ -241,8 +241,16 @@ export async function shareOrDownloadFile(contents: string, filename: string, mi
 }
 
 export async function downloadLedgerBackup(data: AppDataV2): Promise<void> {
+  // 🚨 Kept as a named local on its own line, not inlined into the call
+  // below: verify-backup-format-parity.ts asserts THIS TEXT is present,
+  // because the guarantee it protects — one serialiser, one parser, for
+  // the cloud snapshot and the file export alike — is structural, and a
+  // second `JSON.stringify` anywhere in a write path would break it
+  // silently. Inlining it broke that check during the 2026-09-24
+  // statement work; the check was right.
+  const json = serialiseLedgerBackup(data)
   const date = toLocalIsoDate(new Date())
-  await shareOrDownloadFile(serialiseLedgerBackup(data), `finance-ledger-backup-${date}.json`, 'application/json')
+  await shareOrDownloadFile(json, `finance-ledger-backup-${date}.json`, 'application/json')
 }
 
 export function parseLedgerBackupJson(json: string): AppDataV2 {

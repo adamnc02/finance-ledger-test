@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
-import { ArrowDown, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PieChart, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
+import { ArrowDown, Download, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PieChart, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, inCycleWindow, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { buildCycleForecastChain } from '../lib/cycleForecastChain'
@@ -43,6 +43,8 @@ import { seededCategoryIdForIcon, distinctByCategory, DEFAULT_POT_CATEGORY_ICON,
 import { loanCyclePeriods, buildLoanCycleSections, loanTrendAsBalanceSeries, loanSignedAmount, buildLoanTrendEvents, LOAN_PAYMENT_KIND_LABELS } from '../lib/loanLedger'
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 import { buildDeck, deckEntryKey, heroLabel, type DeckEntry } from '../lib/deck'
+import { StatementRangeSheet } from '../components/StatementRangeSheet'
+import { downloadCycleStatement } from '../lib/statementFile'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -284,6 +286,62 @@ export function Home() {
           averageSpendForecast={averageSpendForecast}
         />
       </div>
+
+      <StatementDownloadButton data={data} />
+    </div>
+  )
+}
+
+/**
+ * The cycle statement's one and only entry point (PROMPT-18 D1).
+ *
+ * Adam: "The button and date picker will live on the home page at the
+ * bottom, single button which launches the date picker."
+ *
+ * 🚨 Deliberately NOT per-card, even though the statement has a section
+ * per card: one file covers the whole deck (§0 Q2), and a button on a
+ * card face would imply otherwise.
+ */
+function StatementDownloadButton({ data }: { data: AppDataV2 }) {
+  const [open, setOpen] = useState(false)
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  return (
+    <div className="mt-6 mb-2">
+      <button
+        onClick={() => {
+          setError(null)
+          setOpen(true)
+        }}
+        disabled={busy}
+        className="w-full py-3 rounded-full text-sm font-semibold text-white flex items-center justify-center gap-2"
+        style={{ background: 'var(--color-coral)', opacity: busy ? 0.6 : 1 }}
+      >
+        <Download size={15} />
+        {busy ? 'Building your statement…' : 'Download statement'}
+      </button>
+      {error && <p className="text-[11px] text-center mt-2" style={{ color: 'var(--color-negative)' }}>{error}</p>}
+      {open && (
+        <StatementRangeSheet
+          data={data}
+          onCancel={() => setOpen(false)}
+          onConfirm={async (range) => {
+            setOpen(false)
+            setBusy(true)
+            try {
+              await downloadCycleStatement(data, range)
+            } catch (err) {
+              // A failure here is the one the person cannot diagnose —
+              // the file simply never appears — so it is said out loud
+              // rather than logged to a console nobody opens on a phone.
+              setError(err instanceof Error ? err.message : 'The statement could not be created.')
+            } finally {
+              setBusy(false)
+            }
+          }}
+        />
+      )}
     </div>
   )
 }
