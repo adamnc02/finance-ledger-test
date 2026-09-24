@@ -12,7 +12,7 @@
 // is computeProjection itself, a thin wrapper over computeProjectionToDate
 // for exactly this reason. See TECHNICAL.md §"The cycle statement".
 //
-// The file the person downloads NEVER computes a balance (B11.1): a row's
+// The file the person downloads NEVER computes a balance (the file never computes a balance): a row's
 // running balance is a fact about that row, produced here, and trimming
 // the view in the file does not change it.
 
@@ -37,7 +37,7 @@ export interface StatementRow {
   id: string
   date: string
   /**
-   * 🚨 The reader never sees the word "payee" (B12.20). The app's
+   * 🚨 The reader never sees the word "payee" (the reader never sees the word "payee"). The app's
    * `Transaction.payee` keeps its internal name; everything the reader
    * sees says "description", because the column mixes counterparties with
    * plain descriptions and holds incoming money too, where nothing in the
@@ -64,7 +64,7 @@ export interface StatementRow {
   /** Loan rows only — the split behind B12.10's two columns. */
   capital: number | null
   interest: number | null
-  /** Pre-formatted for the table; the raw `amount`/`balance` are for the pivot's sums. One money formatter, never two (B11.2). */
+  /** Pre-formatted for the table; the raw `amount`/`balance` are for the pivot's sums. One money formatter, never two (one money formatter, never two). */
   amountText: string
   balanceText: string
 }
@@ -91,7 +91,7 @@ export interface StatementMeta {
   fullRangeEnd: string
   earliestAvailable: string
   cycles: { key: string; label: string; start: string }[]
-  /** Present ONLY when the chosen start was earlier than `earliestAvailable` (B12.13). */
+  /** Present ONLY when the chosen start was earlier than `earliestAvailable` (a clamped window explains itself). */
   clamp?: { requestedStart: string; reason: string }
 }
 
@@ -110,7 +110,7 @@ export function transactionLabel(t: Pick<Transaction, 'note' | 'categoryId' | 't
   return t.note || (data.categories.find((c) => c.id === t.categoryId)?.name ?? t.type)
 }
 
-/** A cycle's own label — "14 Sep – 13 Oct 2026". 🚨 Never a sort key: `meta.cycles[].start` is (B12.1). */
+/** A cycle's own label — "14 Sep – 13 Oct 2026". 🚨 Never a sort key: `meta.cycles[].start` is (sort by an ordering key, never by the label). */
 export function cycleLabel(start: Date, end: Date): string {
   const s = start.toLocaleDateString('en-GB', { day: 'numeric', month: 'short' })
   const e = end.toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
@@ -197,7 +197,7 @@ function foldAndTrim<T extends { date: string }>(
 const byDate = (a: { date: string }, b: { date: string }) => a.date.localeCompare(b.date)
 
 export interface StatementOptions {
-  /** The dates the person picked. The payload still carries the WHOLE containing cycles at both ends (§0.5 O2) — the file trims the view. */
+  /** The dates the person picked. The payload still carries the WHOLE containing cycles at both ends (the window is symmetric) — the file trims the view. */
   selectedStart: string
   selectedEnd: string
   asOfDate?: Date
@@ -207,7 +207,7 @@ export interface StatementOptions {
 /**
  * The whole payload. One call, one substitution into the template.
  *
- * 🚨 Sections are `buildDeck(data)` minus `kind === 'household'` (B12.9 —
+ * 🚨 Sections are `buildDeck(data)` minus `kind === 'household'` (the one deliberate exclusion —
  * Adam: "it's not that useful as a statement"). That is the one deliberate
  * departure from "one section per deck card", and it is a named exclusion
  * here rather than a silent filter somewhere in the rendering.
@@ -255,7 +255,7 @@ export function buildStatementPayload(data: AppDataV2, options: StatementOptions
   const windowEndDate = parseLocalDate(fullRangeEnd)
 
   const cards = buildDeck(data)
-    // 🚨 The named exclusion (B12.9). Not a silent filter.
+    // 🚨 The named exclusion (the one deliberate exclusion from "one section per deck card"). Not a silent filter.
     .filter((entry) => entry.kind !== 'household')
     .map((entry) => buildCard(entry, data, { fullRangeStart, fullRangeEnd, windowStartDate, windowEndDate, cycles, asOfDate }))
     .filter((card): card is StatementCard => card !== null)
@@ -438,9 +438,9 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
       //
       // So the rows come from buildLoanLedgerRows — the same function the
       // Loans page renders — which carries `capital`, `interest` and
-      // `balanceAfter` straight from the engine. B12.11 then holds by
-      // construction: the running figure folds by CAPITAL because nothing
-      // here folds anything at all.
+      // `balanceAfter` straight from the engine. The rule that a loan
+      // folds by CAPITAL then holds by construction, because nothing here
+      // folds anything at all.
       const rows: StatementRow[] = buildLoanLedgerRows(loan)
         .filter((r) => r.date >= ctx.fullRangeStart && r.date <= ctx.fullRangeEnd)
         .sort(byDate)
@@ -521,7 +521,7 @@ function buildCard(entry: DeckEntry, data: AppDataV2, ctx: CardContext): Stateme
       return { id, label, kind: 'credit_card', sub: `Credit card · ${card.name}`, openingBalance: opening, openingDate: ctx.fullRangeStart, balanceLabel: 'Card balance', hasSplit: false, rows }
     }
 
-    // 🚨 Household is excluded before this switch is reached (B12.9). It
+    // 🚨 Household is excluded before this switch is reached (the one deliberate exclusion from "one section per deck card"). It
     // is listed here so a future card kind cannot fall through silently.
     case 'household':
       return null

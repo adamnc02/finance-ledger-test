@@ -1,7 +1,7 @@
 // The statement and the Home page must agree, row for row and figure for
 // figure, about the same window.
 //
-// This is PROMPT-18 A1's check, and the reason the statement is a
+// This is the "statement matches Home" check, and the reason the statement is a
 // serialiser rather than a second engine: a statement that disagrees with
 // the Home screen is worse than no statement at all — it is two numbers,
 // both claiming to be the balance, with nothing on either screen to say
@@ -63,7 +63,7 @@ check('one payload cycle per Home cycle', payload.meta.cycles.length, cycles.len
 check('each cycle key carries the cycle\'s own start as its sort key', payload.meta.cycles.map((c) => c.start), cycles.map((c) => iso(c.start)))
 
 // ── The deck ───────────────────────────────────────────────────────────
-// Household is the one deliberate exclusion (B12.9). Everything else the
+// Household is the one deliberate exclusion (the one deliberate exclusion from "one section per deck card"). Everything else the
 // Home page swipes through must have a section.
 assert('no Household section', !payload.cards.some((c) => c.kind === 'household'))
 assert('the Personal card is present', payload.cards.some((c) => c.id === 'personal'))
@@ -147,7 +147,7 @@ function homeRows(all: Transaction[], opening: number, sign: (t: Transaction) =>
   assert('Card: every row sits inside the window', card.rows.every((r) => r.date >= windowStart && r.date <= windowEnd))
 }
 
-// ── Trimming changes the view, never a figure (B11.1) ──────────────────
+// ── Trimming changes the view, never a figure (the file never computes a balance) ──────────────────
 {
   // The same statement asked for a NARROWER selected window: the payload
   // still carries the whole cycles, and a row's balance is a fact about

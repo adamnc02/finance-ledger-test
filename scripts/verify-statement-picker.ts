@@ -69,7 +69,8 @@ const currentIndex = cycles.findIndex((c) => c.current)
 }
 
 // ── An empty cycle is not offered at all ───────────────────────────────
-// 🚨 This REVERSES PROMPT-18 E3.5 (listed-but-disabled). Adam,
+// 🚨 This REVERSES the round's original design, which had empty
+// cycles listed-but-disabled. Adam,
 // 2026-09-24, having seen it in the first UAT round: a row of greyed
 // "no data" cycles is clutter, not an explanation. The assertions below
 // are the reversal made enforceable, so a later session restoring the old
@@ -104,7 +105,7 @@ const currentIndex = cycles.findIndex((c) => c.current)
   check('one payload cycle per offered cycle in the window', payload.meta.cycles.length, THREE_CYCLES_AHEAD + 1)
   check('the payload cycle labels are the picker\'s labels', payload.meta.cycles.map((c) => c.label), cycles.slice(currentIndex, currentIndex + THREE_CYCLES_AHEAD + 1).map((c) => c.label))
 
-  // E4.3 / §0.5 O2 — exact dates still hold the whole containing cycles.
+  // Symmetric window — exact dates still hold the whole containing cycles.
   const exact = buildStatementPayload(data, { selectedStart: '2026-09-20', selectedEnd: '2026-10-05', asOfDate: ASOF })
   assert('an exact-date window still carries the whole containing cycles', exact.meta.fullRangeStart < exact.meta.selectedStart && exact.meta.fullRangeEnd > exact.meta.selectedEnd)
   check('a window inside ONE cycle is one cycle, not none', exact.meta.cycles.length, 1)

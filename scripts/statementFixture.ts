@@ -5,7 +5,7 @@
 // carries ~100 free-text values naming two real people's banks, insurers,
 // subscriptions and merchants, so a fixture seeded from one could never be
 // removed again. The statement round's original hand-built reference was
-// deleted on 2026-09-24 for exactly that reason (PROMPT-18 T7). These
+// deleted on 2026-09-24 for exactly that reason (real data must never reach a repo). These
 // names, dates and figures are invented.
 //
 // Shared by verify-cycle-statement.ts, verify-cycle-statement-matches-home.ts
@@ -88,7 +88,7 @@ const rent: RecurringTemplate = {
   kind: 'bill',
 } as unknown as RecurringTemplate
 
-/** A loan with real interest AND an overpayment — the overpayment is 100% capital and zero interest, which is the clearest demonstration of why the split is worth showing (B12.10). */
+/** A loan with real interest AND an overpayment — the overpayment is 100% capital and zero interest, which is the clearest demonstration of why the split is worth showing (the capital/interest columns). */
 const loan: Loan = {
   id: 'car',
   name: 'Car Finance',

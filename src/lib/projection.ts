@@ -69,8 +69,8 @@ export function horizonCycles(data: AppDataV2, personId: string, horizon: Projec
  * "now" by a fixed count.
  *
  * Built for the downloadable cycle statement, whose window is a date
- * range the person picks (PROMPT-18 §0.5 O2: the range is SYMMETRIC — it
- * always holds whole cycles at both ends, and the file trims the VIEW).
+ * range the person picks (the range is SYMMETRIC: it always holds whole cycles at both ends,
+ * and the file trims the VIEW).
  * The picker's own list of offerable cycles comes from here too, so the
  * rows a statement contains and the cycles the picker offered can never
  * disagree about where a cycle starts.

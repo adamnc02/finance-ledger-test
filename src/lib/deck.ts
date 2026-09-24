@@ -6,7 +6,7 @@
 // 🚨 That is the whole reason this file exists. A statement whose sections
 // came from their own list would silently stop matching the app the first
 // time a card type was added — the sections and the deck would disagree,
-// and nothing would fail. See TECHNICAL.md §"The cycle statement", B4.1.
+// and nothing would fail. See TECHNICAL.md §"The cycle statement".
 
 import type { AppDataV2 } from '../types/ledger'
 import { visibleLoanCards } from './loanLedger'

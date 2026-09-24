@@ -6,7 +6,7 @@ import { cycleLabel } from '../lib/statement'
 import { toLocalIsoDate as iso, parseLocalDate } from '../lib/date'
 import { formatFullDate } from '../lib/format'
 
-// The cycle statement's date picker (PROMPT-18 Part E).
+// The cycle statement's date picker (the statement round, 2026-09-24).
 //
 // 🚨 YOU CANNOT HIGHLIGHT DATES IN A NATIVE PICKER. Adam asked for cycle
 // starts to be marked in the calendar; `<input type="date">` renders its
@@ -68,11 +68,11 @@ export interface OfferableCycle {
  * same helper `horizonCycles` and the statement's own cycle bands use. A
  * second cycle-walker would drift from the bands the statement draws, and
  * two answers about where a cycle starts cannot be told apart from the
- * screen (E6.3).
+ * screen (one cycle walker, never two).
  *
  * 🚨 Cycles with NO data are not offered at all.
  *
- * This REVERSES PROMPT-18 E3.5, which had them listed-but-disabled on the
+ * This REVERSES the statement round, 2026-09-24 E3.5, which had them listed-but-disabled on the
  * reasoning that "a list that simply starts later looks like a bug".
  * Adam, 2026-09-24, first UAT round, having seen it: a row of greyed
  * "no data" cycles is clutter, not an explanation. **Do not restore
@@ -126,7 +126,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
   // the scroll bug on 2026-09-24; the two were not unrelated.
   const [asOf] = useState(() => asOfDate ?? new Date())
   const personId = data.primaryPersonId
-  // 🚨 The SIGNED-IN person's cycles, always (E5) — `resolveCycleBounds`
+  // 🚨 The SIGNED-IN person's cycles, always (the signed-in person's cycles, always) — `resolveCycleBounds`
   // is per-person and a statement spans Personal, Joint, pots and cards,
   // so the picker does not follow the selected card.
   const payCycle = data.payCycles.find((pc) => pc.personId === personId)
@@ -140,7 +140,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
 
   // 🚨 The default window is the span the Home page's "Next 3 cycles"
   // already means, so the statement opens on something the person
-  // recognises. Read from THREE_CYCLES_AHEAD; never hardcode 4 (E3.2).
+  // recognises. Read from THREE_CYCLES_AHEAD; never hardcode 4 (the default window is the Home page's own horizon).
   const [mode, setMode] = useState<'cycles' | 'exact'>('cycles')
   const [fromIndex, setFromIndex] = useState(currentIndex)
   const [toIndex, setToIndex] = useState(Math.min(currentIndex + THREE_CYCLES_AHEAD, cycles.length - 1))
@@ -151,7 +151,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
   const toListRef = useRef<HTMLDivElement>(null)
   const painted = useRef(false)
 
-  // 🚨 FIRST PAINT ONLY (E3.3). Both lists open scrolled so THIS cycle
+  // 🚨 FIRST PAINT ONLY (first paint only). Both lists open scrolled so THIS cycle
   // sits at the top — the past is above, reachable by scrolling up. A
   // redraw must preserve the scroll position, or every tap throws the
   // list back to the top.
@@ -195,7 +195,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
 
   function cycleRow(c: OfferableCycle, index: number, which: 'from' | 'to') {
     const isSelected = which === 'from' ? fromIndex === index : toIndex === index
-    // 🚨 An impossible window is never OFFERED (E3.4) — the invalid rows
+    // 🚨 An impossible window is never OFFERED (an impossible window is never offered) — the invalid rows
     // are disabled as the other end moves, rather than being accepted and
     // then complained about.
     const blocked = (which === 'to' && index < fromIndex) || (which === 'from' && index > toIndex)
@@ -208,7 +208,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
         aria-pressed={isSelected}
         onClick={() => {
           // 🚨 Commit the cycle's OWN bounds from the walker, never a date
-          // re-parsed from the label (E6.1) — the exact defect
+          // re-parsed from the label (display what you key) — the exact defect
           // verify-overpayment-picker-real-dates.ts exists to prevent.
           if (which === 'from') setFromIndex(index)
           else setToIndex(index)
@@ -228,7 +228,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
   }
 
   function chips(which: 'start' | 'end') {
-    // 🚨 The chips SET the input (E4.2). They are a shortcut INTO the
+    // 🚨 The chips SET the input (the chips SET the input). They are a shortcut INTO the
     // native control, not a caption beside it.
     return (
       <div className="flex gap-1.5 overflow-x-auto pb-1">
@@ -319,7 +319,7 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
         )}
 
         {/* 🚨 A clamped window explains itself BEFORE anything is generated
-            (B12.13), as well as inside the file. A statement shorter than
+            (a clamped window explains itself), as well as inside the file. A statement shorter than
             it was asked to be, with nothing to say why, is one nobody can
             trust — and a silent clamp is indistinguishable from missing
             data. */}

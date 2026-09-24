@@ -5,8 +5,8 @@ import { Share, X } from 'lucide-react'
 // The statement, shown INSIDE the app.
 //
 // 🚨 WHY THIS EXISTS. The whole premise of the design was that one
-// downloaded file covers every view, on the phone and on the laptop
-// (PROMPT-18 §0 Q1). On iOS that premise is false: a saved .html opens in
+// downloaded file covers every view, on the phone and on the laptop.
+// On iOS that premise is false: a saved .html opens in
 // the Files app's Quick Look preview, which renders the markup but does
 // NOT run scripts — so the controls appear and nothing else does — and as
 // of 2026 iOS no longer offers "open in Safari" for a local HTML file

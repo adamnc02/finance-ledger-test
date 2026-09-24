@@ -22,7 +22,7 @@
 // never highlights, which is exactly how two of them shipped broken.
 //
 // Fixture: scripts/statementFixture.ts — fictional, and it must stay that
-// way (PROMPT-18 T7; every ledger repo is public).
+// way (real data must never reach a repo; every ledger repo is public).
 
 import { readFileSync } from 'node:fs'
 import { statementFixture, ASOF } from './statementFixture'
@@ -33,11 +33,11 @@ const template = readFileSync(new URL('../src/statement/statement-template.html'
 /**
  * The window deliberately starts and ends MID-CYCLE, so the payload
  * carries whole cycles at both ends while the selected window trims both
- * (§0.5 O2). A statement whose selected dates happened to be cycle bounds
+ * (the window is symmetric). A statement whose selected dates happened to be cycle bounds
  * would let a broken trim pass unnoticed.
  */
 const main = buildStatementPayload(statementFixture(), { selectedStart: '2026-09-18', selectedEnd: '2026-10-31', asOfDate: ASOF })
-/** A second document, asked for from before the reconciliation floor, purely to exercise the clamp note (B12.13). */
+/** A second document, asked for from before the reconciliation floor, purely to exercise the clamp note (a clamped window explains itself). */
 const clampedPayload = buildStatementPayload(statementFixture(), { selectedStart: '2026-08-01', selectedEnd: '2026-10-31', asOfDate: ASOF })
 
 const html = renderStatementHtml(main, template)
@@ -122,7 +122,7 @@ const labels = (d: string): string[] => T.buildTree(rows, [d]).children.map((c: 
 // Derived, not hard-coded: the original asserted the mock's own two
 // labels. What the reported bug was actually about is ORDER — cycles
 // came out newest-first because "14 Oct…" sorts before "14 Sep…"
-// alphabetically (B12.1) — so this asserts the labels appear in the
+// alphabetically (sort by an ordering key, never by the label) — so this asserts the labels appear in the
 // payload's own cycle order, whatever those labels say.
 ok('cycles ascending, in the payload\'s own order', JSON.stringify(labels('cycle')) ===
    JSON.stringify(T.META.cycles.map((c: Any) => c.label)), labels('cycle').join(' | '));
@@ -347,7 +347,7 @@ console.log('\n8. SUBTOTAL POSITION + CLAMP NOTE');
   else console.log('\nSECTION 8 ALL PASS');
 }
 
-console.log('\n9. SYMMETRIC WINDOW (§0.5 O2)');
+console.log('\n9. SYMMETRIC WINDOW (the window is symmetric)');
 {
   const T4: Any = (globalThis as Any).__T; let f4 = 0;
   const ok4 = (n: string, c: Any, x?: Any) => { if (c) console.log('  ✓ ' + n); else { console.log('  ✗ ' + n + (x ? '  -> ' + x : '')); f4++; } };
@@ -952,7 +952,7 @@ console.log('\n19. THE PROJECTED FIGURE IS QUOTED AT THE WINDOW’S END (Adam, 2
      check by adding up the rows in front of you, without reference to the
      app or to anything else. So that is asserted, not just labelled.
 
-     Cash cards only. A LOAN folds by capital, not by cash (B12.11), and a
+     Cash cards only. A LOAN folds by capital, not by cash (the capital-folding rule), and a
      CREDIT CARD's balance is its own replay through cardBalanceAsOf
      because interest has no row of its own to fold — so on those two,
      "start + amounts" deliberately does NOT equal the closing figure, and
