@@ -45,6 +45,7 @@ import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '
 import { buildDeck, deckEntryKey, heroLabel, type DeckEntry } from '../lib/deck'
 import { StatementRangeSheet } from '../components/StatementRangeSheet'
 import { StatementViewer } from '../components/StatementViewer'
+import { StatementDestinationModal } from '../components/StatementDestinationModal'
 import { buildCycleStatement, shareCycleStatement } from '../lib/statementFile'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -308,6 +309,7 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [statement, setStatement] = useState<{ html: string; filename: string } | null>(null)
+  const [choosing, setChoosing] = useState(false)
 
   return (
     <div className="mt-6 mb-2">
@@ -332,14 +334,14 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
             setOpen(false)
             setBusy(true)
             try {
-              // 🚨 Built once, then SHOWN — not built and immediately
-              // handed to the Share Sheet. On iOS a saved .html opens in
-              // Quick Look, which does not run scripts, and iOS no longer
-              // offers "open in Safari" for a local file: the download
-              // alone left the statement unreadable on the one device
-              // Adam actually uses (2026-09-24 UAT). Saving a copy is a
-              // button inside the viewer.
+              // 🚨 Built once, then the person chooses where it goes. On
+              // iOS a saved .html opens in Quick Look, which does not run
+              // scripts, and iOS no longer offers "open in Safari" for a
+              // local file — so the FILE is a laptop document and the
+              // modal says so before anyone discovers it the hard way
+              // (Adam, 2026-09-24 UAT). One render, both destinations.
               setStatement(buildCycleStatement(data, range))
+              setChoosing(true)
             } catch (err) {
               // A failure here is the one the person cannot diagnose —
               // the statement simply never appears — so it is said out
@@ -352,7 +354,25 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
           }}
         />
       )}
-      {statement && (
+      {statement && choosing && (
+        <StatementDestinationModal
+          onCancel={() => {
+            setChoosing(false)
+            setStatement(null)
+          }}
+          onSave={async () => {
+            setChoosing(false)
+            setStatement(null)
+            try {
+              await shareCycleStatement(statement)
+            } catch (err) {
+              setError(err instanceof Error ? err.message : 'The statement could not be saved.')
+            }
+          }}
+          onView={() => setChoosing(false)}
+        />
+      )}
+      {statement && !choosing && (
         <StatementViewer
           html={statement.html}
           filename={statement.filename}
