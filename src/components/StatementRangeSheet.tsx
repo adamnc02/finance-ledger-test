@@ -31,7 +31,18 @@ import { formatFullDate } from '../lib/format'
 export interface StatementRangeSheetProps {
   data: AppDataV2
   onCancel: () => void
-  onConfirm: (range: { selectedStart: string; selectedEnd: string }) => void
+  /**
+   * `preview` opens the statement in the app; `save` hands the file
+   * straight to the Share Sheet without showing it.
+   *
+   * 🚨 The choice lives HERE, on the picker, rather than in a modal after
+   * the fact (Adam, 2026-09-24 UAT). The two destinations are genuinely
+   * different things — one is read now, the other is kept, printed and
+   * emailed — and an extra confirmation between "Create" and the result
+   * is a step that answers a question the person already knew the answer
+   * to when they opened the sheet.
+   */
+  onConfirm: (range: { selectedStart: string; selectedEnd: string }, destination: 'preview' | 'save') => void
   /** Overridable for tests; the app always passes today. */
   asOfDate?: Date
 }
@@ -332,10 +343,28 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: Sta
           <button onClick={onCancel} className="flex-1 py-2.5 rounded-full text-sm font-medium text-[var(--color-ink-muted)]" style={{ background: 'var(--color-bg-elevated)' }}>
             Cancel
           </button>
-          <button onClick={() => onConfirm(selected)} className="flex-1 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
-            Create statement
+          <button
+            onClick={() => onConfirm(selected, 'preview')}
+            className="flex-1 py-2.5 rounded-full text-sm font-semibold text-[var(--color-ink)]"
+            style={{ background: 'var(--color-bg-elevated)', border: '1px solid var(--color-coral)' }}
+          >
+            Preview
+          </button>
+          <button onClick={() => onConfirm(selected, 'save')} className="flex-1 py-2.5 rounded-full text-sm font-semibold text-white" style={{ background: 'var(--color-coral)' }}>
+            Save
           </button>
         </div>
+        {/* 🚨 Said here, at the point of choosing, not discovered later on
+            the way to a laptop: a saved .html opens in the Files app's
+            Quick Look, which renders the markup but does not run scripts,
+            and iOS no longer offers "open in Safari" for a local file. A
+            page with buttons and no table is indistinguishable from a
+            broken statement (Adam, 2026-09-24 UAT). */}
+        <p className="text-[10.5px] text-center mt-2.5 leading-relaxed text-[var(--color-ink-faint)]">
+          <strong className="text-[var(--color-ink-muted)]">Preview</strong> opens it here.{' '}
+          <strong className="text-[var(--color-ink-muted)]">Save</strong> gives you the file — iPhones can't open it, so email or AirDrop it to
+          your laptop.
+        </p>
       </div>
     </div>,
     document.body,

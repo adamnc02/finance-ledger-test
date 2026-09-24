@@ -45,7 +45,6 @@ import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '
 import { buildDeck, deckEntryKey, heroLabel, type DeckEntry } from '../lib/deck'
 import { StatementRangeSheet } from '../components/StatementRangeSheet'
 import { StatementViewer } from '../components/StatementViewer'
-import { StatementDestinationModal } from '../components/StatementDestinationModal'
 import { buildCycleStatement, shareCycleStatement } from '../lib/statementFile'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
@@ -309,7 +308,6 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [statement, setStatement] = useState<{ html: string; filename: string } | null>(null)
-  const [choosing, setChoosing] = useState(false)
 
   return (
     <div className="mt-6 mb-2">
@@ -330,18 +328,17 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
         <StatementRangeSheet
           data={data}
           onCancel={() => setOpen(false)}
-          onConfirm={(range) => {
+          onConfirm={async (range, destination) => {
             setOpen(false)
             setBusy(true)
             try {
-              // 🚨 Built once, then the person chooses where it goes. On
-              // iOS a saved .html opens in Quick Look, which does not run
-              // scripts, and iOS no longer offers "open in Safari" for a
-              // local file — so the FILE is a laptop document and the
-              // modal says so before anyone discovers it the hard way
-              // (Adam, 2026-09-24 UAT). One render, both destinations.
-              setStatement(buildCycleStatement(data, range))
-              setChoosing(true)
+              // 🚨 ONE render, both destinations. Building separately for
+              // the preview and the download would be two chances to
+              // differ, on the one artefact whose entire value is that
+              // its figures are right.
+              const built = buildCycleStatement(data, range)
+              if (destination === 'preview') setStatement(built)
+              else await shareCycleStatement(built)
             } catch (err) {
               // A failure here is the one the person cannot diagnose —
               // the statement simply never appears — so it is said out
@@ -354,25 +351,7 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
           }}
         />
       )}
-      {statement && choosing && (
-        <StatementDestinationModal
-          onCancel={() => {
-            setChoosing(false)
-            setStatement(null)
-          }}
-          onSave={async () => {
-            setChoosing(false)
-            setStatement(null)
-            try {
-              await shareCycleStatement(statement)
-            } catch (err) {
-              setError(err instanceof Error ? err.message : 'The statement could not be saved.')
-            }
-          }}
-          onView={() => setChoosing(false)}
-        />
-      )}
-      {statement && !choosing && (
+      {statement && (
         <StatementViewer
           html={statement.html}
           filename={statement.filename}

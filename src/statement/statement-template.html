@@ -239,6 +239,17 @@
     td { padding:7px 7px; }
     .date { font-size:11.5px; }
     .num { font-size:12px; }
+    /* 🚨 THREE TILES, ONE ROW, at every width (Adam, 2026-09-24 UAT).
+       `auto-fit` with a 190px minimum fits exactly two columns on a
+       phone, so the three tiles wrapped to a 2x2 grid with an empty
+       fourth cell — which reads as a missing figure rather than as a
+       layout. They are one row of three or they are nothing; the type
+       shrinks to pay for it. */
+    .figures { grid-template-columns:repeat(3,1fr); }
+    .fig { padding:10px 9px; }
+    .fig dt { font-size:9.5px; letter-spacing:.04em; margin-bottom:4px; }
+    .fig dd { font-size:15px; }
+    .fig small { font-size:10px; }
   }
   @media (max-width:380px) {
     .main { padding-inline:12px; }
@@ -247,6 +258,10 @@
     td { padding:6px 5px; }
     .num { font-size:11px; }
     .date { font-size:10.5px; }
+    .fig { padding:9px 7px; }
+    .fig dt { font-size:9px; }
+    .fig dd { font-size:13.5px; }
+    .fig small { font-size:9.5px; }
   }
 
   @media print {
