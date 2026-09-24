@@ -158,6 +158,24 @@ to a live app. Neither live app has the scripts to produce one.
 
 Append-only. Newest first.
 
+### 2026-09-24 — PROMPT-18: the downloadable cycle statement
+**Nothing new is test-only.** Every file the statement adds is shared app code and goes to both
+live apps: `src/statement/statement-template.html`, `src/lib/statement.ts`,
+`src/lib/statementFile.ts`, `src/lib/deck.ts`, `src/components/StatementRangeSheet.tsx`, the arbitrary-window
+variants in `projection.ts` / `jointAccountLedger.ts` / `potLedger.ts` / `loanLedger.ts` /
+`creditCards.ts` / `savingsPotLedger.ts`, and the four `scripts/statementFixture.ts` +
+`verify-cycle-statement*.ts` + `verify-statement-picker.ts` files.
+
+The start-of-session diff against `personal-ledger` was clean: every difference was an
+already-listed row, plus the known `.gitignore` newline and eleven untracked `scripts/_diag*.ts` /
+`_uat*.ts` scratch files left over from an earlier session (never committed).
+
+🚨 **`src/statement/statement-template.html` is imported with Vite's `?raw`**, so it is inlined into
+the bundle at build time and never fetched. That matters for `personal-ledger`, which is
+permanently offline: a fetched template would fail silently on the one app that can least afford
+it. Anything that runs outside Vite — every verify script — reads the file from disk instead, which
+is why `renderStatementHtml` takes the template as an argument.
+
 ### 2026-09-22 — PROMPT-14: Backup & Restore, and low-balance alerts
 Nine files added to "Mirrors `shared-finance-ledger`": the two sync-store checks from Parts 4 and 5,
 and the seven Part 7 alert files. All identical in the test app and `shared-finance-ledger`; none of
