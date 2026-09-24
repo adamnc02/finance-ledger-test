@@ -99,15 +99,21 @@ function tagFor(c: OfferableCycle): string {
   return ''
 }
 
-export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate = new Date() }: StatementRangeSheetProps) {
+export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate }: StatementRangeSheetProps) {
+  // 🚨 Pinned once, on mount. A `new Date()` default PARAMETER is a fresh
+  // object on every render, so every `useMemo` keyed on it was
+  // invalidated on every render and rebuilt the whole cycle list —
+  // including the one the scroll effect below measures. Found alongside
+  // the scroll bug on 2026-09-24; the two were not unrelated.
+  const [asOf] = useState(() => asOfDate ?? new Date())
   const personId = data.primaryPersonId
   // 🚨 The SIGNED-IN person's cycles, always (E5) — `resolveCycleBounds`
   // is per-person and a statement spans Personal, Joint, pots and cards,
   // so the picker does not follow the selected card.
   const payCycle = data.payCycles.find((pc) => pc.personId === personId)
-  const earliestAvailable = payCycle?.openingBalanceDate ?? iso(asOfDate)
+  const earliestAvailable = payCycle?.openingBalanceDate ?? iso(asOfDate ?? new Date())
 
-  const cycles = useMemo(() => offerableCycles(data, personId, asOfDate, earliestAvailable), [data, personId, asOfDate, earliestAvailable])
+  const cycles = useMemo(() => offerableCycles(data, personId, asOf, earliestAvailable), [data, personId, asOf, earliestAvailable])
   const currentIndex = Math.max(
     0,
     cycles.findIndex((c) => c.current),
@@ -119,8 +125,8 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate = new 
   const [mode, setMode] = useState<'cycles' | 'exact'>('cycles')
   const [fromIndex, setFromIndex] = useState(currentIndex)
   const [toIndex, setToIndex] = useState(Math.min(currentIndex + THREE_CYCLES_AHEAD, cycles.length - 1))
-  const [exactStart, setExactStart] = useState(cycles[currentIndex]?.start ?? iso(asOfDate))
-  const [exactEnd, setExactEnd] = useState(cycles[Math.min(currentIndex + THREE_CYCLES_AHEAD, cycles.length - 1)]?.end ?? iso(asOfDate))
+  const [exactStart, setExactStart] = useState(cycles[currentIndex]?.start ?? iso(asOf))
+  const [exactEnd, setExactEnd] = useState(cycles[Math.min(currentIndex + THREE_CYCLES_AHEAD, cycles.length - 1)]?.end ?? iso(asOf))
 
   const fromListRef = useRef<HTMLDivElement>(null)
   const toListRef = useRef<HTMLDivElement>(null)
@@ -130,18 +136,30 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate = new 
   // sits at the top — the past is above, reachable by scrolling up. A
   // redraw must preserve the scroll position, or every tap throws the
   // list back to the top.
+  //
+  // 🚨 MEASURED WITH getBoundingClientRect, NOT offsetTop. `offsetTop` is
+  // measured from the nearest POSITIONED ancestor, and a plain
+  // `overflow-y-auto` div is not positioned — so it resolved against the
+  // sheet instead of the list, produced a number larger than the list's
+  // own scroll height, and the browser clamped it to the maximum. Both
+  // lists opened hard at the BOTTOM, eleven months into the future
+  // (Adam, 2026-09-24, first UAT step). The rect difference is relative
+  // to whatever the container actually is, so it cannot resolve against
+  // the wrong element.
   useEffect(() => {
     if (painted.current) return
     painted.current = true
     for (const ref of [fromListRef, toListRef]) {
-      const row = ref.current?.querySelector<HTMLElement>(`[data-index="${currentIndex}"]`)
-      if (row && ref.current) ref.current.scrollTop = row.offsetTop
+      const list = ref.current
+      const row = list?.querySelector<HTMLElement>(`[data-index="${currentIndex}"]`)
+      if (!list || !row) continue
+      list.scrollTop = list.scrollTop + (row.getBoundingClientRect().top - list.getBoundingClientRect().top)
     }
   }, [currentIndex])
 
   const selected =
     mode === 'cycles'
-      ? { selectedStart: cycles[fromIndex]?.start ?? iso(asOfDate), selectedEnd: cycles[toIndex]?.end ?? iso(asOfDate) }
+      ? { selectedStart: cycles[fromIndex]?.start ?? iso(asOf), selectedEnd: cycles[toIndex]?.end ?? iso(asOf) }
       : { selectedStart: exactStart, selectedEnd: exactEnd }
 
   // What the file will actually hold: the whole cycles containing both
@@ -250,11 +268,11 @@ export function StatementRangeSheet({ data, onCancel, onConfirm, asOfDate = new 
         {mode === 'cycles' ? (
           <>
             <p className="text-[11px] uppercase tracking-wide text-[var(--color-ink-faint)] mb-1">From</p>
-            <div ref={fromListRef} className="max-h-40 overflow-y-auto rounded-xl mb-3" style={{ background: 'var(--color-bg)' }}>
+            <div ref={fromListRef} className="max-h-40 overflow-y-auto rounded-xl mb-3 relative" style={{ background: 'var(--color-bg)' }}>
               {cycles.map((c, i) => cycleRow(c, i, 'from'))}
             </div>
             <p className="text-[11px] uppercase tracking-wide text-[var(--color-ink-faint)] mb-1">To</p>
-            <div ref={toListRef} className="max-h-40 overflow-y-auto rounded-xl mb-3" style={{ background: 'var(--color-bg)' }}>
+            <div ref={toListRef} className="max-h-40 overflow-y-auto rounded-xl mb-3 relative" style={{ background: 'var(--color-bg)' }}>
               {cycles.map((c, i) => cycleRow(c, i, 'to'))}
             </div>
           </>
