@@ -936,14 +936,41 @@ console.log('\n19. THE PROJECTED FIGURE IS QUOTED AT THE WINDOW’S END (Adam, 2
   // the selected window's own start date.
   TD.render();
   const figuresHtml = (globalThis as Any).document.getElementById('figures').innerHTML
-  okE('the opening tile is labelled with the window being viewed', figuresHtml.includes('Balance on ' + TD.shortDate(selBounds.start)),
-      figuresHtml.slice(0, 120));
+  okE('the tile is headed "Starting balance", not "opening figure"', /<dt>Starting balance<\/dt>/.test(figuresHtml), figuresHtml.slice(0, 120));
+  okE('and carries the date of the window being viewed', figuresHtml.includes(TD.shortDate(selBounds.start) + ', before the first row'),
+      figuresHtml.slice(0, 160));
   okE('and shows the balance after the last row before that window',
       figuresHtml.includes(TD.money(before[before.length - 1].balance)),
       'expected ' + TD.money(before[before.length - 1].balance));
   okE('which is genuinely NOT the full range’s opening figure, so this is not vacuous',
       before[before.length - 1].balance !== card2.openingBalance,
       'they coincide');
+  TD.state.range = 'full';
+
+  /* 🚨 THE STARTING BALANCE RECONCILES INSIDE THE DOCUMENT.
+     Adam's whole reason for asking for it (2026-09-24): a figure you can
+     check by adding up the rows in front of you, without reference to the
+     app or to anything else. So that is asserted, not just labelled.
+
+     Cash cards only. A LOAN folds by capital, not by cash (B12.11), and a
+     CREDIT CARD's balance is its own replay through cardBalanceAsOf
+     because interest has no row of its own to fold — so on those two,
+     "start + amounts" deliberately does NOT equal the closing figure, and
+     asserting that it did would be asserting a bug. */
+  for (const range of ['full', 'selected']) {
+    TD.state.range = range;
+    for (const c of TD.CARDS.filter((x: Any) => ['personal', 'joint', 'pot', 'savings_pot'].indexOf(x.kind) !== -1)) {
+      const rs = TD.rowsFor(c, { showCleared: true, range });
+      if (!rs.length) continue;
+      const start = c.rows.filter((r: Any) => r.date < TD.windowBounds(range).start).slice(-1)[0];
+      const opening = start ? start.balance : c.openingBalance;
+      const sum = rs.reduce((a: number, r: Any) => a + r.amount, 0);
+      const closing = rs[rs.length - 1].balance;
+      okE(range + ' · ' + c.id + ': starting balance + every row = the closing figure',
+          Math.abs(opening + sum - closing) < 0.005,
+          opening + ' + ' + sum.toFixed(2) + ' = ' + (opening + sum).toFixed(2) + ', closing ' + closing);
+    }
+  }
   TD.state.range = 'full';
 
   if (fe) { console.log('\n' + fe + ' FAILED'); process.exitCode = 1; }
