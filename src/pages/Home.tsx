@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { formatCurrency } from '../lib/format'
 import { toLocalIsoDate, todayIso, parseLocalDate } from '../lib/date'
-import { ArrowDown, Download, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PieChart, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
+import { ArrowDown, FileText, ArrowUp, ChevronDown, ChevronUp, CreditCard as CreditCardIcon, Layers, PieChart, PiggyBank, Wallet, SlidersHorizontal, X, TrendingUp, RotateCcw } from 'lucide-react'
 import { useLedgerData } from '../context/LedgerContext'
 import { computeProjection, horizonCycles, inCycleWindow, horizonRangeEnd, THREE_CYCLES_AHEAD, buildPersonalTrendSeries, type ProjectionHorizon } from '../lib/projection'
 import { buildCycleForecastChain } from '../lib/cycleForecastChain'
@@ -44,7 +44,8 @@ import { loanCyclePeriods, buildLoanCycleSections, loanTrendAsBalanceSeries, loa
 import type { AppDataV2, CreditCard, Loan, Pot, SavingsPot, Transaction } from '../types/ledger'
 import { buildDeck, deckEntryKey, heroLabel, type DeckEntry } from '../lib/deck'
 import { StatementRangeSheet } from '../components/StatementRangeSheet'
-import { downloadCycleStatement } from '../lib/statementFile'
+import { StatementViewer } from '../components/StatementViewer'
+import { buildCycleStatement, shareCycleStatement } from '../lib/statementFile'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
 
@@ -306,6 +307,7 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
   const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [statement, setStatement] = useState<{ html: string; filename: string } | null>(null)
 
   return (
     <div className="mt-6 mb-2">
@@ -318,26 +320,48 @@ function StatementDownloadButton({ data }: { data: AppDataV2 }) {
         className="w-full py-3 rounded-full text-sm font-semibold text-white flex items-center justify-center gap-2"
         style={{ background: 'var(--color-coral)', opacity: busy ? 0.6 : 1 }}
       >
-        <Download size={15} />
-        {busy ? 'Building your statement…' : 'Download statement'}
+        <FileText size={15} />
+        {busy ? 'Building your statement…' : 'Statement'}
       </button>
       {error && <p className="text-[11px] text-center mt-2" style={{ color: 'var(--color-negative)' }}>{error}</p>}
       {open && (
         <StatementRangeSheet
           data={data}
           onCancel={() => setOpen(false)}
-          onConfirm={async (range) => {
+          onConfirm={(range) => {
             setOpen(false)
             setBusy(true)
             try {
-              await downloadCycleStatement(data, range)
+              // 🚨 Built once, then SHOWN — not built and immediately
+              // handed to the Share Sheet. On iOS a saved .html opens in
+              // Quick Look, which does not run scripts, and iOS no longer
+              // offers "open in Safari" for a local file: the download
+              // alone left the statement unreadable on the one device
+              // Adam actually uses (2026-09-24 UAT). Saving a copy is a
+              // button inside the viewer.
+              setStatement(buildCycleStatement(data, range))
             } catch (err) {
               // A failure here is the one the person cannot diagnose —
-              // the file simply never appears — so it is said out loud
-              // rather than logged to a console nobody opens on a phone.
+              // the statement simply never appears — so it is said out
+              // loud rather than logged to a console nobody opens on a
+              // phone.
               setError(err instanceof Error ? err.message : 'The statement could not be created.')
             } finally {
               setBusy(false)
+            }
+          }}
+        />
+      )}
+      {statement && (
+        <StatementViewer
+          html={statement.html}
+          filename={statement.filename}
+          onClose={() => setStatement(null)}
+          onShare={async () => {
+            try {
+              await shareCycleStatement(statement)
+            } catch (err) {
+              setError(err instanceof Error ? err.message : 'The statement could not be saved.')
             }
           }}
         />

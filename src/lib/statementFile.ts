@@ -19,11 +19,28 @@ export function statementTemplate(): string {
 }
 
 /**
- * Build the statement and hand it to the Share Sheet (or a plain download
- * where sharing files is not available) — the same path a backup takes,
- * reused rather than reimplemented.
+ * Build the statement once: the exact bytes that get both shown in the
+ * app and saved to a file.
+ *
+ * 🚨 One render, two destinations. Generating separately for the viewer
+ * and for the download would be two chances to differ, on the one
+ * artefact whose entire value is that its figures are right.
  */
-export async function downloadCycleStatement(data: AppDataV2, options: StatementOptions): Promise<void> {
+export function buildCycleStatement(data: AppDataV2, options: StatementOptions): { html: string; filename: string } {
   const payload = buildStatementPayload(data, options)
-  await shareOrDownloadFile(renderStatementHtml(payload, templateHtml), statementFilename(payload), 'text/html')
+  return { html: renderStatementHtml(payload, templateHtml), filename: statementFilename(payload) }
+}
+
+/**
+ * Hand a built statement to the Share Sheet (or a plain download where
+ * sharing files is not available) — the same path a backup takes, reused
+ * rather than reimplemented.
+ */
+export async function shareCycleStatement(statement: { html: string; filename: string }): Promise<void> {
+  await shareOrDownloadFile(statement.html, statement.filename, 'text/html')
+}
+
+/** Build and share in one step, for anywhere that wants the file and not the viewer. */
+export async function downloadCycleStatement(data: AppDataV2, options: StatementOptions): Promise<void> {
+  await shareCycleStatement(buildCycleStatement(data, options))
 }
