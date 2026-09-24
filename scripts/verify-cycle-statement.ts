@@ -58,7 +58,8 @@ function load(doc: string): Any {
     js.trimEnd().slice(0, -'})();'.length) +
     `
   globalThis.__T = { statementTable, analysisTable, state, rowsFor, windowBounds, cardById,
-                     buildTree, pathKey, money, signed, CARDS, META, renderPanel, currentFiltered, render };
+                     buildTree, pathKey, money, signed, CARDS, META, renderPanel, currentFiltered, render,
+                     longDate, shortDate };
 })();`
 
   /* Segmented controls need REAL buttons, or syncSegs iterates nothing and
@@ -886,4 +887,65 @@ console.log('\n18. THE GROUPS PANEL (Analysis only, one entry per FIELD)');
   TC.state.pivot.cols = []; TC.state.mode = 'statement'; TC.state.group = 'day'; TC.render();
   if (fd) { console.log('\n' + fd + ' FAILED'); process.exitCode = 1; }
   else console.log('\nSECTION 18 ALL PASS');
+}
+
+console.log('\n19. THE PROJECTED FIGURE IS QUOTED AT THE WINDOW’S END (Adam, 2026-09-24 UAT)');
+{
+  const TD: Any = (globalThis as Any).__T; let fe = 0;
+  const okE = (n: string, c: Any, x?: Any) => { if (c) console.log('  ✓ ' + n); else { console.log('  ✗ ' + n + (x ? '  -> ' + x : '')); fe++; } };
+
+  /* The reported bug: a window running to 24 Dec whose last payment fell
+     on 27 Nov was labelled "Projected balance, 27 Nov" — in the tfoot and
+     in the third tile. It reads as though the projection stops at the last
+     transaction, and it disagrees with the app, which always quotes its
+     projected figure at the cycle end. The FIGURE is untouched; only the
+     label moved. */
+  TD.state.mode = 'statement'; TD.state.group = 'day'; TD.state.split = false;
+
+  for (const range of ['full', 'selected']) {
+    TD.state.range = range;
+    const card = TD.cardById('personal');
+    const rows = TD.rowsFor(card, { showCleared: true, range });
+    const bounds = TD.windowBounds(range);
+    const html2 = TD.statementTable(card, rows);
+    const label = html2.match(/Projected balance, ([^<]*)</)[1];
+    const lastRowDate = rows[rows.length - 1].date;
+
+    okE(range + ': the tfoot quotes the window’s end exactly', label === TD.longDate(bounds.end),
+        'label "' + label + '", window ends ' + TD.longDate(bounds.end));
+    okE(range + ': and NOT the last row’s own date', lastRowDate === bounds.end || label !== TD.longDate(lastRowDate),
+        'label "' + label + '", last row ' + TD.longDate(lastRowDate));
+    // The figure must be untouched by the relabelling.
+    const figure = html2.match(/Projected balance,[\s\S]*?<td class="num bal">([^<]*)</)[1];
+    okE(range + ': the figure is still the last row’s balance', figure === TD.money(rows[rows.length - 1].balance),
+        figure + ' vs ' + TD.money(rows[rows.length - 1].balance));
+    // And the window genuinely extends past the last transaction here, or
+    // this whole section is vacuous.
+    if (range === 'full') okE('the fixture’s window really does outlast its last transaction', bounds.end > lastRowDate, bounds.end + ' vs ' + lastRowDate);
+  }
+
+  /* The opening tile belongs to the window being VIEWED. `card.openingBalance`
+     is the full range's opening, so a trimmed view was labelled with one date
+     and showing another date's figure. */
+  TD.state.range = 'selected';
+  const card2 = TD.cardById('personal');
+  const selBounds = TD.windowBounds('selected');
+  const before = card2.rows.filter((r: Any) => r.date < selBounds.start);
+  okE('the fixture’s selected window really does trim rows off the front', before.length > 0, String(before.length));
+  // Rendered, not inferred: the tile must show that row's balance under
+  // the selected window's own start date.
+  TD.render();
+  const figuresHtml = (globalThis as Any).document.getElementById('figures').innerHTML
+  okE('the opening tile is labelled with the window being viewed', figuresHtml.includes('Balance on ' + TD.shortDate(selBounds.start)),
+      figuresHtml.slice(0, 120));
+  okE('and shows the balance after the last row before that window',
+      figuresHtml.includes(TD.money(before[before.length - 1].balance)),
+      'expected ' + TD.money(before[before.length - 1].balance));
+  okE('which is genuinely NOT the full range’s opening figure, so this is not vacuous',
+      before[before.length - 1].balance !== card2.openingBalance,
+      'they coincide');
+  TD.state.range = 'full';
+
+  if (fe) { console.log('\n' + fe + ' FAILED'); process.exitCode = 1; }
+  else console.log('\nSECTION 19 ALL PASS');
 }
