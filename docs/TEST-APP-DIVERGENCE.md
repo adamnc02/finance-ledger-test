@@ -158,7 +158,7 @@ to a live app. Neither live app has the scripts to produce one.
 
 Append-only. Newest first.
 
-### 2026-10-02 — PROMPT-19: household page visibility, and the Manage-upcoming pill
+### 2026-10-02 — household page visibility, and the Manage-upcoming pill
 **Nothing new is test-only.** Every file is shared app code and goes to both live apps:
 `src/lib/householdView.ts`, `src/components/PausedOccurrencesControl.tsx`, the four pages
 (`Bills.tsx`, `Salary.tsx`, `Expenses.tsx`, `Loans.tsx`), the two new checks
