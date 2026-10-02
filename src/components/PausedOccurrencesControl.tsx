@@ -53,11 +53,16 @@ import { useSavedFlash, SavedFlashOverlay } from './SavedFlash'
  * control and the only difference is which way the chevron points (down to
  * expand, up to collapse).
  *
- * Its visual language is CancelButton's (FormButtons.tsx): a full-width pill on
- * `--color-surface` with a `1px solid var(--color-track)` border. It differs in
- * two ways, both deliberate: the text is white rather than muted ink, and
- * `py-1.5 text-xs` makes it one step SHORTER than Cancel's `py-2 text-sm`, so a
- * form's Cancel/Save pair still reads as the primary pair on the card.
+ * A full-width pill with CancelButton's `1px solid var(--color-track)` border,
+ * white text, and `py-1.5 text-xs` — one step SHORTER than Cancel's `py-2
+ * text-sm`, so a form's Cancel/Save pair still reads as the primary pair.
+ *
+ * Its fill is a TRANSLUCENT WHITE, not a palette colour, because the control
+ * appears on two different backgrounds: an ordinary `--color-surface` card and
+ * the `--color-bg-elevated` panel. An 8% white overlay sits on top of whichever
+ * one is behind it and lands slightly lighter than it, so one value is correct
+ * everywhere and a new call site needs no decision. A fixed `--color-surface`
+ * fill was invisible on a surface card — only its border showed.
  *
  * Text and chevron are centred together as one group, which is why the chevron
  * sits inside the same `justify-center` flex row rather than being pushed to an
@@ -71,7 +76,7 @@ function ManageUpcomingTrigger({ expanded, label, onClick }: { expanded: boolean
       onClick={onClick}
       aria-expanded={expanded}
       className="w-full flex items-center justify-center gap-1 py-1.5 rounded-full text-xs font-semibold text-white"
-      style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}
+      style={{ background: 'rgba(255,255,255,0.08)', border: '1px solid var(--color-track)' }}
     >
       {label}
       <Chevron size={14} />
@@ -210,21 +215,21 @@ export function PausedOccurrencesControl({
 
   return (
     <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
-      {!expanded ? (
-        <ManageUpcomingTrigger
-          expanded={false}
-          label={`Manage upcoming payments${currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}`}
-          onClick={toggleExpanded}
-        />
-      ) : (
-        // data-no-swipe (2026-09-19, Adam-reported): every call site sits
-        // inside a SwipeToDelete row, and a touch in this scrolling card was
-        // ambiguous between scrolling it and swiping the row to delete. Same
-        // guard as the pot's "What this pot pays" checklist.
-        <div data-no-swipe className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <div className="mb-2">
-            <ManageUpcomingTrigger expanded label="Manage upcoming payments" onClick={toggleExpanded} />
-          </div>
+      {/* ONE trigger, rendered unconditionally, OUTSIDE the panel below — so
+          opening the section cannot move it. Rendering it inside the panel
+          puts the panel's own `p-3` above it, which shifted the button down
+          12px on every tap and back up on close. */}
+      <ManageUpcomingTrigger
+        expanded={expanded}
+        label={`Manage upcoming payments${!expanded && currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}`}
+        onClick={toggleExpanded}
+      />
+      {expanded && (
+        // data-no-swipe: every call site sits inside a SwipeToDelete row, and
+        // a touch in this scrolling card was ambiguous between scrolling it
+        // and swiping the row to delete. Same guard as the pot's "What this
+        // pot pays" checklist.
+        <div data-no-swipe className="mt-2 rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto overscroll-contain mb-2">
             {sortedDates.map(({ originalDate, date }) => {
               const isPaused = currentlyPaused.has(originalDate)

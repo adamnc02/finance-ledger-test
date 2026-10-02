@@ -39,7 +39,13 @@ check('a single shared ManageUpcomingTrigger exists', trigger.length > 0, true)
 check('…and it is the only one', (control.match(/function ManageUpcomingTrigger\(/g) ?? []).length, 1)
 // The pre-fix shape: two bare <button onClick={toggleExpanded}> literals.
 check('no bare toggleExpanded button is left behind', /<button onClick=\{toggleExpanded\}/.test(control), false)
-check('both states render the shared trigger', (control.match(/<ManageUpcomingTrigger/g) ?? []).length, 2)
+// ONE element, rendered unconditionally. Two elements — one per branch of a
+// ternary — is what let the expanded copy sit inside the panel and jump 12px
+// down the moment the section opened.
+check('the trigger is rendered exactly once', (control.match(/<ManageUpcomingTrigger/g) ?? []).length, 1)
+check('…unconditionally, so expanding cannot move it', /<ManageUpcomingTrigger\n[\s\S]{0,260}?\/>\s*\{expanded && \(/.test(control), true)
+check('…and it is OUTSIDE the collapsible panel', /<ManageUpcomingTrigger[\s\S]*?<div data-no-swipe/.test(control), true)
+check('the panel carries its own top margin instead', /<div data-no-swipe className="mt-2 rounded-xl p-3"/.test(control), true)
 
 console.log('\n── The pill ──')
 
@@ -48,12 +54,17 @@ check('text and chevron centred as one group', /\bjustify-center\b/.test(trigger
 check('pill, not a rounded rectangle', /\brounded-full\b/.test(trigger), true)
 check('white text', /\btext-white\b/.test(trigger), true)
 
-console.log('\n── CancelButton\'s visual language ──')
+console.log('\n── Cancel\'s border and a lighter fill ──')
 
 const cancel = buttons.match(/export function CancelButton\([\s\S]*?\n}/)?.[0] ?? ''
 check('CancelButton was found to compare against', cancel.length > 0, true)
-check('same surface background', /background: 'var\(--color-surface\)'/.test(trigger), true)
 check('same 1px track border', /border: '1px solid var\(--color-track\)'/.test(trigger), true)
+// The fill is a translucent white, not a palette colour: the control appears
+// on an ordinary --color-surface card AND on the --color-bg-elevated panel, and
+// an overlay lands slightly lighter than whichever is behind it. A fixed
+// --color-surface fill was invisible on a surface card — only the border showed.
+check('a translucent white fill, not a fixed palette colour', /background: 'rgba\(255,255,255,0\.08\)'/.test(trigger), true)
+check('…and no fixed surface fill is left behind', /background: 'var\(--color-surface\)'/.test(trigger), false)
 
 const py = (s: string) => Number(s.match(/\bpy-([\d.]+)\b/)?.[1] ?? NaN)
 const textPx = (s: string) => ({ xs: 12, sm: 14, base: 16 })[s.match(/\btext-(xs|sm|base)\b/)?.[1] ?? ''] ?? NaN
