@@ -158,6 +158,23 @@ to a live app. Neither live app has the scripts to produce one.
 
 Append-only. Newest first.
 
+### 2026-10-02 — PROMPT-19: household page visibility, and the Manage-upcoming pill
+**Nothing new is test-only.** Every file is shared app code and goes to both live apps:
+`src/lib/householdView.ts`, `src/components/PausedOccurrencesControl.tsx`, the four pages
+(`Bills.tsx`, `Salary.tsx`, `Expenses.tsx`, `Loans.tsx`), the two new checks
+(`verify-household-view.ts`, `verify-manage-upcoming-trigger.ts`) and the two repointed ones
+(`verify-no-swipe-regions.ts`, `verify-coin-jar-restrictions.ts`).
+
+The start-of-session diff against both live apps was clean: every difference was an already-listed
+row, plus the known `.gitignore` newline, the `package-lock.json` drift, `personal-ledger`'s old
+`pensions-and-wallet-redesign.patch`, and the eleven untracked `scripts/_diag*.ts` / `_uat*.ts`
+scratch files this register already records as never committed.
+
+🚨 **`verify-household-view.ts` reads two real backups by absolute path** — the 2026-09-20 mum file
+as its single-person control and the 2026-09-22 PROD file as its two-person case. The control is
+what makes the suite meaningful in `personal-ledger`, where every real file has one person and the
+filter is latent.
+
 ### 2026-09-24 — PROMPT-18: the downloadable cycle statement
 **Nothing new is test-only.** Every file the statement adds is shared app code and goes to both
 live apps: `src/statement/statement-template.html`, `src/lib/statement.ts`,
