@@ -47,6 +47,38 @@ import { useSavedFlash, SavedFlashOverlay } from './SavedFlash'
  * section open AND closed (there's no other way to close it any more,
  * since Cancel is gone).
  */
+/**
+ * The "Manage upcoming payments" trigger, in both states, as ONE component so
+ * the collapsed and expanded versions cannot drift apart — they are the same
+ * control and the only difference is which way the chevron points (down to
+ * expand, up to collapse).
+ *
+ * Its visual language is CancelButton's (FormButtons.tsx): a full-width pill on
+ * `--color-surface` with a `1px solid var(--color-track)` border. It differs in
+ * two ways, both deliberate: the text is white rather than muted ink, and
+ * `py-1.5 text-xs` makes it one step SHORTER than Cancel's `py-2 text-sm`, so a
+ * form's Cancel/Save pair still reads as the primary pair on the card.
+ *
+ * Text and chevron are centred together as one group, which is why the chevron
+ * sits inside the same `justify-center` flex row rather than being pushed to an
+ * edge.
+ */
+function ManageUpcomingTrigger({ expanded, label, onClick }: { expanded: boolean; label: string; onClick: () => void }) {
+  const Chevron = expanded ? ChevronUp : ChevronDown
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-expanded={expanded}
+      className="w-full flex items-center justify-center gap-1 py-1.5 rounded-full text-xs font-semibold text-white"
+      style={{ background: 'var(--color-surface)', border: '1px solid var(--color-track)' }}
+    >
+      {label}
+      <Chevron size={14} />
+    </button>
+  )
+}
+
 export function PausedOccurrencesControl({
   windowDates,
   currentlyPaused,
@@ -179,20 +211,20 @@ export function PausedOccurrencesControl({
   return (
     <div className="mt-3 pt-3 border-t" style={{ borderColor: 'var(--color-track)' }}>
       {!expanded ? (
-        <button onClick={toggleExpanded} className="flex items-center gap-1 text-xs font-semibold text-white">
-          Manage upcoming payments{currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}
-          <ChevronDown size={14} />
-        </button>
+        <ManageUpcomingTrigger
+          expanded={false}
+          label={`Manage upcoming payments${currentlyPaused.size > 0 ? ` (${currentlyPaused.size} paused)` : ''}`}
+          onClick={toggleExpanded}
+        />
       ) : (
         // data-no-swipe (2026-09-19, Adam-reported): every call site sits
         // inside a SwipeToDelete row, and a touch in this scrolling card was
         // ambiguous between scrolling it and swiping the row to delete. Same
         // guard as the pot's "What this pot pays" checklist.
         <div data-no-swipe className="rounded-xl p-3" style={{ background: 'var(--color-bg-elevated)' }}>
-          <button onClick={toggleExpanded} className="flex items-center gap-1 text-xs font-semibold text-white mb-2 text-left">
-            Manage upcoming payments
-            <ChevronUp size={14} />
-          </button>
+          <div className="mb-2">
+            <ManageUpcomingTrigger expanded label="Manage upcoming payments" onClick={toggleExpanded} />
+          </div>
           <div className="flex flex-col gap-2 max-h-72 overflow-y-auto overscroll-contain mb-2">
             {sortedDates.map(({ originalDate, date }) => {
               const isPaused = currentlyPaused.has(originalDate)
