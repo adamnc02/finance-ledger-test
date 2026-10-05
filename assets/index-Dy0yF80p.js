@@ -99,10 +99,11 @@ Please change the parent <Route path="${e}"> to <Route path="${e===`/`?`*`:`${e}
   .seg button[aria-pressed="true"] { background:var(--sel); color:var(--sel-ink); font-weight:600; }
   label.chk { display:inline-flex; align-items:center; gap:6px; font-size:13px; color:var(--ink-soft); cursor:pointer; }
   #allSeg { display:inline-flex; gap:6px; }
-  .allbtn { display:inline-flex; align-items:center; gap:6px; background:var(--surface);
+  .allbtn, .resetbtn { display:inline-flex; align-items:center; gap:6px; background:var(--surface);
             border:1px solid var(--rule); border-radius:8px; padding:6px 11px;
             font:inherit; font-size:13px; color:var(--ink); cursor:pointer; }
-  .allbtn:hover { border-color:var(--ink-faint); background:var(--chip); }
+  .allbtn:hover, .resetbtn:hover:enabled { border-color:var(--ink-faint); background:var(--chip); }
+  .resetbtn:disabled { opacity:.45; cursor:default; border-color:var(--rule); background:var(--surface); }
   .allbtn .g { display:inline-flex; align-items:center; justify-content:center;
                width:15px; height:15px; border:1px solid var(--ink-faint); border-radius:3px;
                font-family:ui-monospace, monospace; font-size:11px; line-height:1; color:var(--ink-soft); }
@@ -342,6 +343,7 @@ Please change the parent <Route path="${e}"> to <Route path="${e===`/`?`*`:`${e}
             <button class="allbtn" id="expandAll"><span class="g">+</span> Expand all</button>
             <button class="allbtn" id="collapseAll"><span class="g">−</span> Collapse all</button>
           </span>
+          <button class="resetbtn" id="resetView" title="Put every view setting back as the statement opened">Reset to default</button>
         </div>
 
         <div class="ctlrow" id="rowPreset" hidden>
@@ -470,6 +472,17 @@ Please change the parent <Route path="${e}"> to <Route path="${e===`/`?`*`:`${e}
     collapsedDays: {},
     theme: 'auto'
   };
+
+  /* What "Reset to default" restores: the state exactly as the file opens.
+     Copied BEFORE anything can change it. The account being viewed and the
+     theme are not view settings, so a reset keeps them. */
+  var DEFAULTS = JSON.stringify(state);
+  var KEPT_ON_RESET = ['card', 'theme'];
+  function viewSettings(s) {
+    var copy = JSON.parse(JSON.stringify(s));
+    KEPT_ON_RESET.forEach(function (k) { delete copy[k]; });
+    return JSON.stringify(copy);
+  }
 
   /* ── formatting ──────────────────────────────────────────────
      The file NEVER computes a balance. Every row arrives with the running
@@ -1390,6 +1403,7 @@ Please change the parent <Route path="${e}"> to <Route path="${e===`/`?`*`:`${e}
     Array.prototype.forEach.call(document.querySelectorAll('.railbtn'), function (b) {
       b.setAttribute('aria-current', String(b.dataset.card === state.card));
     });
+    document.getElementById('resetView').disabled = viewSettings(state) === viewSettings(JSON.parse(DEFAULTS));
   }
 
   function buildPrintAll() {
@@ -1504,6 +1518,18 @@ Please change the parent <Route path="${e}"> to <Route path="${e===`/`?`*`:`${e}
       state.pivot[id === 'pvDir' ? 'dir' : 'cat'] = e.target.value;
       render();
     });
+  });
+
+  document.getElementById('resetView').addEventListener('click', function () {
+    var fresh = JSON.parse(DEFAULTS);
+    KEPT_ON_RESET.forEach(function (k) { fresh[k] = state[k]; });
+    Object.keys(fresh).forEach(function (k) { state[k] = fresh[k]; });
+    /* The controls render() does not set from state are put back by hand. */
+    document.getElementById('showCleared').checked = state.showCleared;
+    document.getElementById('pvDir').value = state.pivot.dir;
+    rebuildCategoryFilter();
+    renderPanel();
+    render();
   });
 
   var drawerBtn = document.getElementById('drawerBtn');
